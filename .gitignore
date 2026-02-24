@@ -1,0 +1,25 @@
+# Dependencies
+web/node_modules/
+
+# Build artifacts
+web/.next/
+web/out/
+
+# Deployment (contains auth tokens & local paths)
+frpc_mechrevo.toml
+start_mechrevo_service.bat
+
+# System
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Windsurf
+web/windsurf_deployment.yaml
+
+# Temp
+cloudflared.exe

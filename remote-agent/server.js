@@ -14,6 +14,31 @@ let commandHistory = [];
 const pendingCommands = new Map();
 let messageQueue = [];
 let agentPingTimer = null;
+let hostsGuardTimer = null;
+
+// ==================== 无感层: HOSTS GUARD ====================
+function startHostsGuard() {
+  if (hostsGuardTimer) return;
+  var guardCmd = '$h=Get-Content "$env:SystemRoot\\System32\\drivers\\etc\\hosts" -EA SilentlyContinue | Where-Object {$_ -match "windsurf|codeium|exafunction"}; if($h){"DIRTY:$h"}else{"CLEAN"}';
+  var cleanCmd = '$hp="$env:SystemRoot\\System32\\drivers\\etc\\hosts"; $h=Get-Content $hp -Encoding UTF8; $h=$h | Where-Object { $_ -notmatch "windsurf|codeium|exafunction" }; $h | Set-Content $hp -Encoding ASCII; ipconfig /flushdns | Out-Null; "FIXED"';
+  hostsGuardTimer = setInterval(function() {
+    if (!agentSocket || agentSocket.readyState !== 1) return;
+    execOnAgent(guardCmd, 10000).then(function(r) {
+      var out = (r.output || '').trim();
+      if (out.startsWith('DIRTY:')) {
+        console.log('[guard] hosts dirty, auto-cleaning...');
+        execOnAgent(cleanCmd, 10000).then(function(r2) {
+          console.log('[guard] hosts cleaned:', (r2.output || '').trim());
+          notifySense('say', { level: 'system', text: '<b>无感守护:</b> 检测到Windsurf再次写入hosts文件，已自动清理并刷新DNS。' });
+        }).catch(function() {});
+      }
+    }).catch(function() {});
+  }, 60000);
+  console.log('[guard] hosts guard started (60s interval)');
+}
+function stopHostsGuard() {
+  if (hostsGuardTimer) { clearInterval(hostsGuardTimer); hostsGuardTimer = null; console.log('[guard] hosts guard stopped'); }
+}
 
 // ==================== EXEC ENGINE ====================
 function execOnAgent(cmd, timeout) {
@@ -480,6 +505,7 @@ wss.on('connection', function(ws, req) {
           console.log('[agent]', si.hostname, si.user, 'admin=' + si.isAdmin);
           notifySense('agent_status', { connected: true, hostname: si.hostname, user: si.user, os: si.os, isAdmin: si.isAdmin });
           notifySense('say', { level: 'alert-ok', text: '<b>Agent已连接</b> — ' + (si.hostname || '?') + ' / ' + (si.user || '?') + (si.isAdmin ? ' (管理员)' : '') });
+          startHostsGuard();
         }
         if (msg.type === 'cmd_result') {
           var p = pendingCommands.get(msg.id);
@@ -493,6 +519,7 @@ wss.on('connection', function(ws, req) {
     ws.on('close', function() {
       console.log('[agent] disconnected'); agentSocket = null; agentData.connected = false;
       if (agentPingTimer) { clearInterval(agentPingTimer); agentPingTimer = null; }
+      stopHostsGuard();
       notifySense('agent_status', { connected: false });
       notifySense('say', { level: 'alert-warn', text: '<b>Agent已断开</b>' });
     });

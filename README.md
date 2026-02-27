@@ -1,58 +1,88 @@
-# 机械革命14+ 诊断中枢 🔧
+# Agent 远程修复中枢 🔧
 
 > 道生一，一生二，二生三，三生万物。
+> AGI = 人 + AI。五感连接远方，大脑分析万象。
 
-**笔记本「开机后自动关机」的完整诊断与修复系统**，专为机械革命无界14+ (AMD Ryzen 7 7840HS) 设计，同样适用于其他笔记本型号的类似故障排查。
+**一套完整的远程电脑诊断与修复系统**，包含 WebSocket 远程诊断中枢、PowerShell 安全守护脚本、笔记本硬件排查手册，适用于 Windows 系统的远程管理与故障排查。
 
-## 🌟 功能
+## ✨ 核心组件
 
-- **🎯 交互式诊断向导** — 10步智能引导，从简到难，步步递进
-- **📋 实时日志** — 自动记录每步操作、发现与结论
-- **📸 拍照存证** — 手机摄像头直接拍摄硬件部件，保存诊断证据
-- **📊 硬件规格速查** — 无界14+ 完整规格 + 6大已知通病
-- **📄 诊断报告** — 自动生成完整排查报告（设备/时间/步骤/发现）
-
-## 📱 设计理念
-
-本工具专为**手机端**优化——你可以一手拿手机查看诊断步骤，一手操作笔记本。
-
-**使用场景**：
-```
-物理笔记本（待修）  ←→  你（维修者）  ←→  手机（诊断中枢）
-```
+| 组件 | 说明 | 技术栈 |
+|------|------|--------|
+| **remote-agent/** | WebSocket 远程诊断中枢 — 浏览器(五感)+Agent(手)+分析引擎(脑) | Node.js + ws + 原生HTML/CSS/JS |
+| **desktop_guardian.ps1** | 系统安全守护 — 23项诊断/14项自动修复/hosts守护 | PowerShell |
+| **诊断手册** | 笔记本硬件排查完整知识库 — 8章从简到难 | Markdown |
+| **web/** | 交互式硬件诊断向导 — 手机端优化 | Next.js 14 + TypeScript + Tailwind |
 
 ## 🚀 快速开始
 
-### 方式一：本地运行
+### 远程诊断中枢
 
 ```bash
-cd web
+cd remote-agent
 npm install
-npm run dev
+node server.js
+# 浏览器打开 http://localhost:3002
+# 目标电脑管理员 PowerShell: irm http://<你的IP>:3002/agent.ps1 | iex
+```
+
+### 系统守护脚本
+
+```powershell
+# 诊断（23项安全检查）
+powershell -ExecutionPolicy Bypass -File desktop_guardian.ps1 -Action diagnose
+
+# 自动修复（14项）
+powershell -ExecutionPolicy Bypass -File desktop_guardian.ps1 -Action fix
+
+# hosts 持续守护（60s间隔，自动清理恶意条目）
+powershell -ExecutionPolicy Bypass -File desktop_guardian.ps1 -Action hosts-guard
+
+# JSON报告输出
+powershell -ExecutionPolicy Bypass -File desktop_guardian.ps1 -Action report
+```
+
+### 诊断向导 (Web)
+
+```bash
+cd web && npm install && npm run dev
 # 浏览器打开 http://localhost:3000
 ```
 
-### 方式二：静态部署
-
-```bash
-cd web
-npm install
-npm run build    # 生成 out/ 目录
-npx http-server out -p 3001 -c-1 --cors -s
-# 浏览器打开 http://localhost:3001
-```
-
-### 方式三：公网访问（FRP隧道）
+### 公网访问（FRP隧道）
 
 1. 复制 `frpc_mechrevo.example.toml` → `frpc_mechrevo.toml`
-2. 填入你自己的 FRP 服务器信息
-3. 复制 `start_mechrevo_service.example.bat` → `start_mechrevo_service.bat`
-4. 修改其中的路径和地址
-5. 双击 `start_mechrevo_service.bat` 即可
+2. 填入你的 FRP 服务器信息
+3. 双击 `start_mechrevo_service.bat` 即可
 
-### 方式四：部署到 Netlify / Vercel
+## 📦 远程诊断中枢 — 架构
 
-`web/` 目录是标准 Next.js 项目，支持一键部署到任何静态托管平台。
+```
+┌─────────────────────────────────────────────────┐
+│              远程诊断中枢 server.js              │
+│                                                  │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐   │
+│  │  五感     │    │   大脑    │    │    手     │   │
+│  │  Sense   │◄──►│  Brain   │◄──►│  Agent   │   │
+│  │ (浏览器)  │    │ (分析)    │    │(PowerShell)│  │
+│  └──────────┘    └──────────┘    └──────────┘   │
+└─────────────────────────────────────────────────┘
+```
+
+- **五感 (浏览器)** — 看见状态 · 听见日志 · 触达终端 · 嗅到问题 · 品味修复
+- **大脑 (分析引擎)** — 17步自动诊断 · Clash/VPN识别 · hosts守护 · 根因分析
+- **Brain CLI** — `node brain.js exec/auto/state/say/msg`
+
+## 🛡️ 系统守护 — desktop_guardian.ps1
+
+23项诊断 + 14项自动修复，覆盖：
+
+- **账号安全** — 无密码账号/幽灵登录
+- **恶意软件** — AlibabaProtect/BingWallpaper
+- **系统配置** — 防火墙/RDP/SMB/hosts/portproxy
+- **服务冲突** — W3SVC(IIS)锁443/SstpSvc/Flexnet
+- **资源监控** — 进程膨胀/C盘空间/远控冗余
+- **hosts守护** — 持续60s监控，自动清理windsurf/codeium条目
 
 ## 📖 诊断手册
 
@@ -71,28 +101,34 @@ npx http-server out -p 3001 -c-1 --cors -s
 
 ## 🛠️ 技术栈
 
-- **Next.js 14** — React 框架
-- **TypeScript** — 类型安全
-- **Tailwind CSS** — 样式系统
-- **Static Export** — 纯静态输出，无需服务端
+- **Node.js + ws** — WebSocket 远程诊断中枢
+- **PowerShell** — 系统守护与自动修复
+- **原生 HTML/CSS/JS** — 零依赖前端（暗色主题）
+- **Next.js 14 + TypeScript + Tailwind** — 交互式诊断向导
 
 ## 📁 项目结构
 
 ```
-mechrevo-repair/
-├── 诊断手册_笔记本开机自动关机.md    # 完整诊断知识库
-├── frpc_mechrevo.example.toml       # FRP配置模板（需自行填写）
+├── README.md                          # 本文件
+├── AGENTS.md                          # AI Agent 操作指南
+├── desktop_guardian.ps1                # 系统安全守护脚本
+├── 诊断手册_笔记本开机自动关机.md       # 硬件排查知识库
+├── frpc_mechrevo.example.toml         # FRP 配置模板
 ├── start_mechrevo_service.example.bat # 一键启动脚本模板
-├── README.md                         # 本文件
-└── web/                              # Next.js Web应用
-    ├── app/
-    │   ├── page.tsx                  # 核心页面（诊断树+5视图）
-    │   ├── layout.tsx                # 布局
-    │   └── globals.css               # 全局样式
-    ├── next.config.js                # Next.js配置（静态导出）
-    ├── tailwind.config.ts            # Tailwind配置
-    ├── package.json
-    └── netlify.toml                  # Netlify部署配置
+├── remote-agent/                      # WebSocket 远程诊断中枢
+│   ├── server.js                     # 服务器 (五感+大脑+Agent)
+│   ├── page.js                       # 前端页面 (暗色主题, 4Tab)
+│   ├── brain.js                      # CLI 工具
+│   ├── package.json                  # 仅依赖 ws 包
+│   ├── .env.example                  # 环境变量模板
+│   ├── frpc.example.toml             # FRP 配置模板
+│   └── README.md                     # 详细文档
+├── web/                               # Next.js 交互式诊断向导
+│   ├── app/page.tsx                  # 核心页面 (诊断树+5视图)
+│   ├── package.json
+│   └── netlify.toml                  # Netlify 部署配置
+└── docs/
+    └── 双机保护手册.md                 # 详细保护体系文档
 ```
 
 ## 🔑 排查核心逻辑（三层递进）

@@ -1,13 +1,22 @@
 # Dependencies
-web/node_modules/
+node_modules/
+__pycache__/
+*.pyc
 
 # Build artifacts
 web/.next/
 web/out/
 
+# Environment & secrets (never commit real tokens)
+.env
+*.env.local
+
 # Deployment (contains auth tokens & local paths)
 frpc_mechrevo.toml
 start_mechrevo_service.bat
+
+# PS Agent state (runtime)
+ps-agent/dao_state.json
 
 # System
 .DS_Store
@@ -21,5 +30,6 @@ Thumbs.db
 # Windsurf
 web/windsurf_deployment.yaml
 
-# Temp
+# Temp / binaries
 cloudflared.exe
+*.exe

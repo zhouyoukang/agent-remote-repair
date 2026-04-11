@@ -33,15 +33,15 @@ let hostsGuardTimer = null;
 // ==================== 无感层: HOSTS GUARD ====================
 function startHostsGuard() {
   if (hostsGuardTimer) return;
-  var guardCmd =
+  const guardCmd =
     '$h=Get-Content "$env:SystemRoot\\System32\\drivers\\etc\\hosts" -EA SilentlyContinue | Where-Object {$_ -match "windsurf|codeium|exafunction"}; if($h){"DIRTY:$h"}else{"CLEAN"}';
-  var cleanCmd =
+  const cleanCmd =
     '$hp="$env:SystemRoot\\System32\\drivers\\etc\\hosts"; $h=Get-Content $hp -Encoding UTF8; $h=$h | Where-Object { $_ -notmatch "windsurf|codeium|exafunction" }; $h | Set-Content $hp -Encoding ASCII; ipconfig /flushdns | Out-Null; "FIXED"';
   hostsGuardTimer = setInterval(function () {
     if (!agentSocket || agentSocket.readyState !== 1) return;
     execOnAgent(guardCmd, 10000)
       .then(function (r) {
-        var out = (r.output || "").trim();
+        const out = (r.output || "").trim();
         if (out.startsWith("DIRTY:")) {
           console.log("[guard] hosts dirty, auto-cleaning...");
           execOnAgent(cleanCmd, 10000)
@@ -73,8 +73,8 @@ function execOnAgent(cmd, timeout) {
   // 优先: WebSocket直连
   if (agentSocket && agentSocket.readyState === 1) {
     return new Promise(function (resolve, reject) {
-      var id = crypto.randomUUID();
-      var timer = setTimeout(function () {
+      const id = crypto.randomUUID();
+      const timer = setTimeout(function () {
         pendingCommands.delete(id);
         reject(new Error("timeout"));
       }, timeout);
@@ -89,7 +89,7 @@ function execOnAgent(cmd, timeout) {
     });
   }
   // 兜底: 通过PS Agent Relay (万法归宗桥接)
-  var hostname = agentData.hostname || "DESKTOP-MASTER";
+  const hostname = agentData.hostname || "DESKTOP-MASTER";
   console.log("[brain->relay]", hostname, cmd.substring(0, 80));
   return bridge
     .execOnRelay(hostname, cmd, Math.ceil(timeout / 1000))
@@ -110,7 +110,7 @@ function forwardTerminal(id, cmd, output, ok) {
 
 // ==================== AGENT SCRIPT ====================
 function getAgentScript() {
-  var L = [];
+  const L = [];
   L.push("# Dao Remote Agent v2.0");
   L.push("# Run as Admin: irm http://" + PUBLIC_URL + "/agent.ps1 | iex");
   L.push('$ErrorActionPreference = "Continue"');
@@ -206,50 +206,50 @@ function getSensePage() {
 
 // ==================== ANALYSIS ENGINE (BROWSER DIAG) ====================
 function analyzeDiagnostics(results) {
-  var dns = results.filter(function (r) {
+  const dns = results.filter(function (r) {
     return r.name.startsWith("DNS:") && !r.name.includes("ref");
   });
-  var https = results.filter(function (r) {
+  const https = results.filter(function (r) {
     return r.name.startsWith("HTTPS:") && !r.name.includes("ref");
   });
-  var ip = results.filter(function (r) {
+  const ip = results.filter(function (r) {
     return r.name.startsWith("IP:");
   });
-  var ref = results.filter(function (r) {
+  const ref = results.filter(function (r) {
     return r.name.includes("ref");
   });
-  var dnsOk = dns.filter(function (r) {
+  const dnsOk = dns.filter(function (r) {
     return r.status === "pass";
   }).length;
-  var dnsFail = dns.filter(function (r) {
+  const dnsFail = dns.filter(function (r) {
     return r.status === "fail";
   }).length;
-  var httpsOk = https.filter(function (r) {
+  const httpsOk = https.filter(function (r) {
     return r.status === "pass";
   }).length;
-  var httpsFail = https.filter(function (r) {
+  const httpsFail = https.filter(function (r) {
     return r.status === "fail";
   }).length;
-  var refOk = ref.filter(function (r) {
+  const refOk = ref.filter(function (r) {
     return r.status === "pass";
   }).length;
 
   // Detect Clash/VPN environment:
   // Pattern 1: DNS returns 198.18.0.x fake-IPs (Clash fake-IP mode)
   // Pattern 2: DNS all fail but HTTPS all pass (Clash blocks DoH but proxies HTTPS)
-  var clashByFakeIP = dns.some(function (r) {
+  const clashByFakeIP = dns.some(function (r) {
     return r.detail && r.detail.match(/198\.18\./);
   });
-  var clashByProxy = dnsFail > 0 && httpsFail === 0 && httpsOk >= 2;
-  var clashDetected = clashByFakeIP || clashByProxy;
+  const clashByProxy = dnsFail > 0 && httpsFail === 0 && httpsOk >= 2;
+  const clashDetected = clashByFakeIP || clashByProxy;
 
-  var a = { level: "", summary: "", fixParts: [], clash: clashDetected };
+  const a = { level: "", summary: "", fixParts: [], clash: clashDetected };
 
   if (clashDetected) {
     // Clash/VPN env: traffic goes through proxy tunnel
     if (httpsOk > 0) {
       a.level = "alert-ok";
-      var mode = clashByFakeIP ? "fake-IP模式" : "DoH拦截+HTTPS代理";
+      const mode = clashByFakeIP ? "fake-IP模式" : "DoH拦截+HTTPS代理";
       a.summary =
         "<b>网络正常 (Clash/VPN代理中)</b> — " +
         mode +
@@ -312,9 +312,9 @@ function analyzeDiagnostics(results) {
 }
 
 function buildFixCommand(parts) {
-  var c = ['Write-Host "===== Windsurf Fix =====" -ForegroundColor Cyan'],
-    s = 1,
-    t = parts.length;
+  const c = ['Write-Host "===== Windsurf Fix =====" -ForegroundColor Cyan'];
+  let s = 1;
+  const t = parts.length;
   if (parts.includes("proxy")) {
     c.push(
       'Write-Host "[' + s + "/" + t + '] Proxy..." -ForegroundColor Yellow',
@@ -379,34 +379,34 @@ function buildFixCommand(parts) {
 
 // ==================== AUTO ANALYSIS ENGINE (AGENT DIAG) ====================
 function analyzeAutoResults(results) {
-  var get = function (name) {
-    var r = results.find(function (x) {
+  const get = function (name) {
+    const r = results.find(function (x) {
       return x.name === name;
     });
     return r ? r.output : "";
   };
-  var ok = function (name) {
-    var r = results.find(function (x) {
+  const ok = function (name) {
+    const r = results.find(function (x) {
       return x.name === name;
     });
     return r && r.ok;
   };
 
-  var issues = [];
-  var fixes = [];
-  var level = "alert-ok";
+  const issues = [];
+  const fixes = [];
+  let level = "alert-ok";
 
   // Detect Clash/VPN: DNS returns 198.18.0.x (Clash fake-IP) or DNS config has 198.18.0.x
-  var dnsWS = get("dns_windsurf");
-  var dnsGH = get("dns_github");
-  var dnsConfig = get("dns_config");
-  var clashDetected =
+  const dnsWS = get("dns_windsurf");
+  const dnsGH = get("dns_github");
+  const dnsConfig = get("dns_config");
+  const clashDetected =
     /198\.18\./.test(dnsWS) ||
     /198\.18\./.test(dnsGH) ||
     /198\.18\./.test(dnsConfig);
 
   // Check hosts — this is critical in BOTH normal and Clash environments
-  var hosts = get("hosts_windsurf");
+  const hosts = get("hosts_windsurf");
   if (hosts && hosts !== "(clean)") {
     issues.push("<b>hosts文件劫持:</b> " + hosts.substring(0, 80));
     if (clashDetected) {
@@ -421,7 +421,7 @@ function analyzeAutoResults(results) {
 
   if (clashDetected) {
     // Clash/VPN environment — different analysis logic
-    var pingOk = get("ping_windsurf").indexOf("True") >= 0;
+    const pingOk = get("ping_windsurf").indexOf("True") >= 0;
     if (pingOk && issues.length === 0) {
       // Clash working + no hosts issue = likely OK
       level = "alert-ok";
@@ -434,8 +434,8 @@ function analyzeAutoResults(results) {
     // Don't flag system proxy — Clash manages it
   } else {
     // Normal (non-VPN) environment — original analysis logic
-    var proxy = get("proxy_check");
-    var envProxy = get("env_proxy");
+    const proxy = get("proxy_check");
+    const envProxy = get("env_proxy");
     if (proxy.indexOf("直接访问") < 0 && proxy.indexOf("Direct") < 0) {
       issues.push(
         "系统代理已配置: " + proxy.replace(/\n/g, " ").substring(0, 60),
@@ -468,7 +468,7 @@ function analyzeAutoResults(results) {
     }
 
     // Connectivity check
-    var ping = get("ping_windsurf");
+    const ping = get("ping_windsurf");
     if (ping.indexOf("False") >= 0) {
       issues.push("windsurf.com:443 TCP连接失败");
       if (issues.length === 1)
@@ -477,7 +477,7 @@ function analyzeAutoResults(results) {
     }
 
     // Firewall check
-    var fw = get("firewall_windsurf");
+    const fw = get("firewall_windsurf");
     if (fw.indexOf("Block") >= 0) {
       issues.push("防火墙规则阻止了Windsurf");
       fixes.push(
@@ -488,8 +488,8 @@ function analyzeAutoResults(results) {
   }
 
   // Check Windsurf process (both envs)
-  var wsProc = get("windsurf_process");
-  var wsPath = get("windsurf_path");
+  const wsProc = get("windsurf_process");
+  const wsPath = get("windsurf_path");
   if (wsProc.indexOf("not running") >= 0) {
     issues.push("Windsurf未运行");
   }
@@ -500,8 +500,8 @@ function analyzeAutoResults(results) {
   }
 
   // Check memory (both envs)
-  var cpuMem = get("cpu_mem");
-  var freeMatch = cpuMem.match(/free ([\d.]+)GB/);
+  const cpuMem = get("cpu_mem");
+  const freeMatch = cpuMem.match(/free ([\d.]+)GB/);
   if (freeMatch && parseFloat(freeMatch[1]) < 1.0) {
     issues.push("内存不足: 仅剩 " + freeMatch[1] + "GB 空闲");
     fixes.push("关闭不必要的程序释放内存");
@@ -509,10 +509,10 @@ function analyzeAutoResults(results) {
   }
 
   // Summary
-  var env = clashDetected
+  const env = clashDetected
     ? ' <span style="color:#ffa726">[Clash/VPN环境]</span>'
     : "";
-  var summary;
+  let summary;
   if (issues.length === 0) {
     summary =
       "<b>诊断完成: 一切正常</b>" +
@@ -546,7 +546,7 @@ function analyzeAutoResults(results) {
 
 // ==================== HTTP SERVER ====================
 function readBody(req, cb) {
-  var b = "";
+  let b = "";
   req.on("data", function (c) {
     b += c;
   });
@@ -563,7 +563,7 @@ function jsonReply(res, data, code) {
 }
 
 const server = http.createServer(function (req, res) {
-  var url = new URL(req.url, "http://localhost");
+  const url = new URL(req.url, "http://localhost");
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
@@ -601,14 +601,14 @@ const server = http.createServer(function (req, res) {
     return;
   }
   if (req.method === "GET" && url.pathname === "/brain/terminal") {
-    var n = parseInt(url.searchParams.get("n")) || 20;
+    const n = parseInt(url.searchParams.get("n")) || 20;
     jsonReply(res, commandHistory.slice(-n));
     return;
   }
   if (req.method === "POST" && url.pathname === "/brain/say") {
     readBody(req, function (body) {
       try {
-        var m = JSON.parse(body);
+        const m = JSON.parse(body);
         if (senseSocket && senseSocket.readyState === 1) {
           senseSocket.send(
             JSON.stringify({
@@ -631,7 +631,7 @@ const server = http.createServer(function (req, res) {
   if (req.method === "POST" && url.pathname === "/brain/command") {
     readBody(req, function (body) {
       try {
-        var m = JSON.parse(body);
+        const m = JSON.parse(body);
         if (senseSocket && senseSocket.readyState === 1) {
           senseSocket.send(
             JSON.stringify({
@@ -652,8 +652,8 @@ const server = http.createServer(function (req, res) {
     return;
   }
   if (req.method === "GET" && url.pathname === "/brain/messages") {
-    var msgs = global.userMessages || [];
-    var clear = url.searchParams.get("clear") !== "false";
+    const msgs = global.userMessages || [];
+    const clear = url.searchParams.get("clear") !== "false";
     if (clear) global.userMessages = [];
     jsonReply(res, { ok: true, count: msgs.length, messages: msgs });
     return;
@@ -661,7 +661,7 @@ const server = http.createServer(function (req, res) {
   if (req.method === "POST" && url.pathname === "/brain/exec") {
     readBody(req, function (body) {
       try {
-        var m = JSON.parse(body);
+        const m = JSON.parse(body);
         execOnAgent(m.cmd, m.timeout || 30000)
           .then(function (r) {
             commandHistory.push({
@@ -713,9 +713,9 @@ const server = http.createServer(function (req, res) {
   if (req.method === "POST" && url.pathname === "/brain/guardian") {
     readBody(req, function (body) {
       try {
-        var m = JSON.parse(body);
-        var hostname = m.hostname || agentData.hostname || "DESKTOP-MASTER";
-        var action = m.action || "diagnose";
+        const m = JSON.parse(body);
+        const hostname = m.hostname || agentData.hostname || "DESKTOP-MASTER";
+        const action = m.action || "diagnose";
         bridge
           .runGuardianViaRelay(hostname, action)
           .then(function (r) {
@@ -738,21 +738,21 @@ const server = http.createServer(function (req, res) {
   if (req.method === "POST" && url.pathname === "/brain/sysinfo") {
     if (agentSocket && agentSocket.readyState === 1) {
       agentSocket.send(JSON.stringify({ type: "get_sysinfo" }));
-      var w = 0,
-        ck = setInterval(function () {
-          w += 500;
-          if (
-            agentData.sysinfo &&
-            agentData.lastUpdate &&
-            Date.now() - new Date(agentData.lastUpdate).getTime() < 15000
-          ) {
-            clearInterval(ck);
-            jsonReply(res, { ok: true, data: agentData.sysinfo });
-          } else if (w > 10000) {
-            clearInterval(ck);
-            jsonReply(res, { ok: false, error: "timeout" });
-          }
-        }, 500);
+      let w = 0;
+      const ck = setInterval(function () {
+        w += 500;
+        if (
+          agentData.sysinfo &&
+          agentData.lastUpdate &&
+          Date.now() - new Date(agentData.lastUpdate).getTime() < 15000
+        ) {
+          clearInterval(ck);
+          jsonReply(res, { ok: true, data: agentData.sysinfo });
+        } else if (w > 10000) {
+          clearInterval(ck);
+          jsonReply(res, { ok: false, error: "timeout" });
+        }
+      }, 500);
     } else {
       jsonReply(res, { ok: false, error: "agent not connected" });
     }
@@ -763,7 +763,7 @@ const server = http.createServer(function (req, res) {
       jsonReply(res, { ok: false, error: "agent not connected" });
       return;
     }
-    var diagSteps = [
+    const diagSteps = [
       { name: "hostname", cmd: "hostname" },
       {
         name: "user",
@@ -828,15 +828,15 @@ const server = http.createServer(function (req, res) {
       },
     ];
     (async function () {
-      var results = [];
+      const results = [];
       notifySense("say", {
         level: "system",
         text: "<b>自动诊断启动</b> — " + diagSteps.length + " 项检查...",
       });
-      for (var i = 0; i < diagSteps.length; i++) {
-        var step = diagSteps[i];
+      for (let i = 0; i < diagSteps.length; i++) {
+        const step = diagSteps[i];
         try {
-          var r = await execOnAgent(step.cmd, 15000);
+          const r = await execOnAgent(step.cmd, 15000);
           results.push({
             name: step.name,
             ok: r.ok,
@@ -858,7 +858,7 @@ const server = http.createServer(function (req, res) {
           });
         }
       }
-      var analysis = analyzeAutoResults(results);
+      const analysis = analyzeAutoResults(results);
       notifySense("say", { level: analysis.level, text: analysis.summary });
       if (analysis.fixes.length > 0) {
         notifySense("say", {
@@ -884,7 +884,7 @@ const server = http.createServer(function (req, res) {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", function (ws, req) {
-  var path = req.url || "";
+  const path = req.url || "";
 
   // ---- SENSE (Browser) ----
   if (path.startsWith("/ws/sense")) {
@@ -893,7 +893,7 @@ wss.on("connection", function (ws, req) {
     senseData.connected = true;
     senseData.lastUpdate = new Date().toISOString();
     while (messageQueue.length > 0) {
-      var m = messageQueue.shift();
+      const m = messageQueue.shift();
       ws.send(
         JSON.stringify({
           type: "say",
@@ -912,7 +912,7 @@ wss.on("connection", function (ws, req) {
 
     ws.on("message", function (data) {
       try {
-        var msg = JSON.parse(data);
+        const msg = JSON.parse(data);
         if (msg.type === "hello") {
           senseData.ua = msg.ua;
           senseData.lastUpdate = new Date().toISOString();
@@ -925,7 +925,7 @@ wss.on("connection", function (ws, req) {
           console.log("[sense] diag complete:", msg.results.length);
           senseData.diagnostics = msg.results;
           senseData.lastUpdate = new Date().toISOString();
-          var a = analyzeDiagnostics(msg.results);
+          const a = analyzeDiagnostics(msg.results);
           console.log("[brain]", a.level, a.summary.replace(/<[^>]*>/g, ""));
           ws.send(
             JSON.stringify({ type: "say", level: a.level, text: a.summary }),
@@ -959,7 +959,7 @@ wss.on("connection", function (ws, req) {
         }
         if (msg.type === "user_exec") {
           if (agentSocket && agentSocket.readyState === 1) {
-            var id = crypto.randomUUID();
+            const id = crypto.randomUUID();
             pendingCommands.set(id, {
               resolve: function (r) {
                 forwardTerminal(id, msg.cmd, r.output, r.ok);
@@ -1030,9 +1030,9 @@ wss.on("connection", function (ws, req) {
 
     ws.on("message", function (data) {
       try {
-        var msg = JSON.parse(data);
+        const msg = JSON.parse(data);
         if (msg.type === "hello") {
-          var si = msg.sysinfo || {};
+          const si = msg.sysinfo || {};
           agentData.hostname = si.hostname;
           agentData.user = si.user;
           agentData.os = si.os;
@@ -1058,7 +1058,7 @@ wss.on("connection", function (ws, req) {
           startHostsGuard();
         }
         if (msg.type === "cmd_result") {
-          var p = pendingCommands.get(msg.id);
+          const p = pendingCommands.get(msg.id);
           if (p) {
             clearTimeout(p.timer);
             pendingCommands.delete(msg.id);

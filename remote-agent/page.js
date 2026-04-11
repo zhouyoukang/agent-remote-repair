@@ -1,5 +1,5 @@
-module.exports = function(PUBLIC_URL) {
-return `<!DOCTYPE html>
+module.exports = function (PUBLIC_URL) {
+  return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -209,10 +209,17 @@ async function runDiag(){
     document.getElementById('dt').appendChild(row);
     try{
       if(t.type==='dns'){
-        var resp=await fetch('https://dns.alidns.com/resolve?name='+t.host+'&type=A',{signal:AbortSignal.timeout(8000)});
-        var d=await resp.json();
-        if(d.Answer&&d.Answer.length>0){r.status='pass';r.detail=d.Answer.map(function(a){return a.data}).join(', ')}
-        else{r.detail='NXDOMAIN'}
+        var dohUrls=['https://cloudflare-dns.com/dns-query?name='+t.host+'&type=A','https://dns.google/resolve?name='+t.host+'&type=A'];
+        var dohOk=false;
+        for(var di=0;di<dohUrls.length&&!dohOk;di++){
+          try{
+            var resp=await fetch(dohUrls[di],{headers:{'Accept':'application/dns-json'},signal:AbortSignal.timeout(8000)});
+            var d=await resp.json();
+            if(d.Answer&&d.Answer.length>0){r.status='pass';r.detail=d.Answer.map(function(a){return a.data}).join(', ');dohOk=true}
+            else if(d.Status===3){r.detail='NXDOMAIN';dohOk=true}
+          }catch(de){}
+        }
+        if(!dohOk){r.detail='All DoH resolvers failed'}
       }else if(t.type==='fetch'){
         var s=Date.now();
         try{await fetch(t.url,{mode:'no-cors',signal:AbortSignal.timeout(10000)});r.status='pass';r.detail=(Date.now()-s)+'ms'}

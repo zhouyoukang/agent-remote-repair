@@ -89,7 +89,7 @@ function execOnAgent(cmd, timeout) {
     });
   }
   // 兜底: 通过PS Agent Relay (万法归宗桥接)
-  const hostname = agentData.hostname || "DESKTOP-MASTER";
+  const hostname = agentData.hostname || "unknown";
   console.log("[brain->relay]", hostname, cmd.substring(0, 80));
   return bridge
     .execOnRelay(hostname, cmd, Math.ceil(timeout / 1000))
@@ -714,7 +714,7 @@ const server = http.createServer(function (req, res) {
     readBody(req, function (body) {
       try {
         const m = JSON.parse(body);
-        const hostname = m.hostname || agentData.hostname || "DESKTOP-MASTER";
+        const hostname = m.hostname || agentData.hostname || "unknown";
         const action = m.action || "diagnose";
         bridge
           .runGuardianViaRelay(hostname, action)
@@ -820,7 +820,7 @@ const server = http.createServer(function (req, res) {
       },
       {
         name: "windsurf_path",
-        cmd: 'Get-ChildItem "C:\\Program Files\\Windsurf","F:\\Windsurf","$env:LOCALAPPDATA\\Programs\\Windsurf" -Filter "Windsurf.exe" -Recurse -EA SilentlyContinue | Select -First 1 | ForEach-Object { $_.FullName }; if(-not $?){"(not found)"}',
+        cmd: '$searchPaths=@("$env:LOCALAPPDATA\\Programs\\Windsurf","$env:ProgramFiles\\Windsurf","${env:ProgramFiles(x86)}\\Windsurf"); foreach($sp in (Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue)){$rp=$sp.Root+"Windsurf"; if($searchPaths -notcontains $rp){$searchPaths+=$rp}}; $found=$null; foreach($p in $searchPaths){$f=Get-ChildItem $p -Filter "Windsurf.exe" -Recurse -EA SilentlyContinue|Select -First 1; if($f){$found=$f.FullName;break}}; if($found){$found}else{"(not found)"}',
       },
       {
         name: "firewall_windsurf",

@@ -47,7 +47,12 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════
 
 PORT = int(os.environ.get('PS_AGENT_PORT', '9910'))
-MASTER_TOKEN = os.environ.get('PS_AGENT_MASTER_TOKEN', 'change-me-your-secret-token')
+_default_token = os.environ.get('PS_AGENT_MASTER_TOKEN', '')
+if not _default_token:
+    _default_token = secrets.token_urlsafe(32)
+    print(f"[WARN] PS_AGENT_MASTER_TOKEN not set, auto-generated: {_default_token}")
+    print(f"[WARN] Set PS_AGENT_MASTER_TOKEN env var for persistent token across restarts")
+MASTER_TOKEN = _default_token
 POLL_TIMEOUT = 30          # 长轮询超时(秒)
 HEARTBEAT_TIMEOUT = 120    # Agent离线判定(秒)
 MAX_OUTPUT_SIZE = 10 * 1024 * 1024  # 10MB max output

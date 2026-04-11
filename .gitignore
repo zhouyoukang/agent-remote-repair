@@ -12,8 +12,10 @@ web/out/
 *.env.local
 
 # Deployment (contains auth tokens & local paths)
-frpc_mechrevo.toml
-start_mechrevo_service.bat
+frpc.toml
+start_service.bat
+*.local.bat
+*.local.toml
 
 # PS Agent state (runtime)
 ps-agent/dao_state.json

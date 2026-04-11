@@ -25,11 +25,15 @@ function Log($msg, $level = 'INFO') {
 if ($Action -in 'diagnose', 'fix', 'report') {
     Log "=== Phase 1: DIAGNOSE ===" 'INFO'
 
-    # 1.1 ai account - NO PASSWORD + ADMIN = CRITICAL
-    $ai = Get-LocalUser -Name 'ai' -ErrorAction SilentlyContinue
-    if ($ai -and $ai.Enabled -and -not $ai.PasswordRequired) {
-        Log "CRIT-01: ai account ENABLED, NO PASSWORD, in Administrators group" 'CRIT'
-        Log "  -> Any network user can RDP/login as admin without password" 'CRIT'
+    # 1.1 Check ALL local accounts - NO PASSWORD + ADMIN = CRITICAL
+    $admins = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | Where-Object { $_.ObjectClass -eq 'User' }
+    foreach ($adm in $admins) {
+        $uName = $adm.Name -replace '^.*\\', ''
+        $u = Get-LocalUser -Name $uName -ErrorAction SilentlyContinue
+        if ($u -and $u.Enabled -and -not $u.PasswordRequired) {
+            Log "CRIT-01: Account '$uName' ENABLED, NO PASSWORD, in Administrators group" 'CRIT'
+            Log "  -> Any network user can RDP/login as admin without password" 'CRIT'
+        }
     }
 
     # 1.2 AlibabaProtect
@@ -68,11 +72,11 @@ if ($Action -in 'diagnose', 'fix', 'report') {
         Log "  -> This ACTIVELY UNDERMINES security by allowing blank password network access" 'CRIT'
     }
 
-    # 1.5 windsurf-LG
-    $wsLG = "$env:USERPROFILE\Desktop\windsurf-LG_1.0.0.10.p.exe"
-    $wsLGlnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\windsurf-LG.lnk"
-    if (Test-Path $wsLGlnk) {
-        Log "WARN-06: windsurf-LG (third-party patcher) in Startup" 'WARN'
+    # 1.5 Suspicious executables in Startup folder
+    $startupDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+    $suspStartup = Get-ChildItem $startupDir -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.lnk','.bat','.cmd','.vbs','.exe' }
+    foreach ($item in $suspStartup) {
+        Log "WARN-06: Suspicious startup item: $($item.Name)" 'WARN'
     }
 
     # 1.6 RDP config regression
@@ -119,10 +123,12 @@ if ($Action -in 'diagnose', 'fix', 'report') {
         }
     }
 
-    # 1.11 zhou1 ghost login
-    $zhou1 = Get-LocalUser -Name 'zhou1' -ErrorAction SilentlyContinue
-    if ($zhou1 -and -not $zhou1.Enabled -and $zhou1.LastLogon -and $zhou1.LastLogon.Date -eq (Get-Date).Date) {
-        Log "WARN-13: zhou1 (disabled) has today's LastLogon — ghost activity?" 'WARN'
+    # 1.11 Disabled accounts with recent login (ghost activity)
+    $disabledUsers = Get-LocalUser -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled -and $_.LastLogon }
+    foreach ($du in $disabledUsers) {
+        if ($du.LastLogon.Date -eq (Get-Date).Date) {
+            Log "WARN-13: '$($du.Name)' (disabled) has today's LastLogon — ghost activity?" 'WARN'
+        }
     }
 
     # 1.12 BingWallpaper from registry autorun
@@ -177,16 +183,12 @@ if ($Action -in 'diagnose', 'fix', 'report') {
         Log "WARN-20: SstpSvc (SSTP VPN) is running — may conflict with port 443" 'WARN'
     }
 
-    # 1.20 windsurf-LG process and port 443
-    $lgProc = Get-Process '*windsurf-LG*' -ErrorAction SilentlyContinue
-    if (-not $lgProc) {
-        Log "WARN-21: windsurf-LG process not found (should be running for Windsurf)" 'WARN'
-    }
-    else {
-        $port443 = netstat -ano 2>$null | Select-String ':443\s' | Select-String 'LISTEN'
-        if (-not $port443) {
-            Log "WARN-22: windsurf-LG running but port 443 not listening" 'WARN'
-        }
+    # 1.20 Port 443 listener check (generic)
+    $port443 = netstat -ano 2>$null | Select-String ':443\s' | Select-String 'LISTEN'
+    if ($port443) {
+        $pid443 = ($port443 -split '\s+')[-1] | Select-Object -First 1
+        $proc443 = Get-Process -Id $pid443 -ErrorAction SilentlyContinue
+        Log "INFO-21: Port 443 in use by $($proc443.ProcessName) (PID: $pid443)" 'INFO'
     }
 
     # 1.21 portproxy should be empty
@@ -203,13 +205,20 @@ if ($Action -in 'diagnose', 'fix', 'report') {
 if ($Action -eq 'fix') {
     Log "`n=== Phase 2: FIX ===" 'INFO'
 
-    # FIX-01: Disable ai account (CRITICAL)
-    try {
-        Disable-LocalUser -Name 'ai' -ErrorAction Stop
-        Log "FIX-01: Disabled ai account (was: no password + admin)" 'FIX'
-        $fixed += 'ai account disabled'
+    # FIX-01: Disable ALL no-password admin accounts (CRITICAL)
+    $admins = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | Where-Object { $_.ObjectClass -eq 'User' }
+    foreach ($adm in $admins) {
+        $uName = $adm.Name -replace '^.*\\\\', ''
+        $u = Get-LocalUser -Name $uName -ErrorAction SilentlyContinue
+        if ($u -and $u.Enabled -and -not $u.PasswordRequired -and $uName -ne $env:USERNAME) {
+            try {
+                Disable-LocalUser -Name $uName -ErrorAction Stop
+                Log "FIX-01: Disabled no-password admin account '$uName'" 'FIX'
+                $fixed += "$uName account disabled"
+            }
+            catch { Log "FAILED: Disable $uName account: $_" 'CRIT' }
+        }
     }
-    catch { Log "FAILED: Disable ai account: $_" 'CRIT' }
 
     # FIX-02: Stop and disable AlibabaProtect
     try {
@@ -240,13 +249,7 @@ if ($Action -eq 'fix') {
     }
     catch { Log "FAILED: LimitBlankPasswordUse: $_" 'CRIT' }
 
-    # FIX-05: Remove windsurf-LG from Startup
-    $wsLGlnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\windsurf-LG.lnk"
-    if (Test-Path $wsLGlnk) {
-        Remove-Item $wsLGlnk -Force
-        Log "FIX-05: Removed windsurf-LG.lnk from Startup" 'FIX'
-        $fixed += 'windsurf-LG removed from Startup'
-    }
+    # FIX-05: (reserved — user-specific startup cleanup handled by FIX-03 pattern)
 
     # FIX-06: Fix RDP settings
     try {
@@ -353,8 +356,8 @@ if ($Action -in 'protect', 'fix') {
         safe_zones       = @(
             'D:\*',
             'E:\*',
-            'C:\Users\Administrator\Desktop',
-            'C:\Users\Administrator\Documents'
+            "$env:USERPROFILE\Desktop",
+            "$env:USERPROFILE\Documents"
         )
         max_processes    = 500
         max_ram_pct      = 90

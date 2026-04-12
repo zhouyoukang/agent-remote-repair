@@ -4,7 +4,8 @@ const crypto = require("crypto");
 const bridge = require("./dao_bridge");
 
 const PORT = process.env.PORT || 3002;
-const PUBLIC_URL = process.env.PUBLIC_URL || "localhost:" + PORT;
+var _publicUrl = process.env.PUBLIC_URL || "localhost:" + PORT;
+var RELAY_PORT = parseInt(process.env.RELAY_PORT || "9910", 10);
 
 // ==================== STATE ====================
 let senseSocket = null;
@@ -112,9 +113,10 @@ function forwardTerminal(id, cmd, output, ok) {
 function getAgentScript() {
   const L = [];
   L.push("# Dao Remote Agent v2.0");
-  L.push("# Run as Admin: irm http://" + PUBLIC_URL + "/agent.ps1 | iex");
+  L.push("# Run as Admin: irm http://" + _publicUrl + "/agent.ps1 | iex");
   L.push('$ErrorActionPreference = "Continue"');
-  L.push('$server = "ws://' + PUBLIC_URL + '/ws/agent"');
+  var wsProto = _publicUrl.match(/\.lhr\.life/) ? "wss" : "ws";
+  L.push('$server = "' + wsProto + "://" + _publicUrl + '/ws/agent"');
   L.push(
     'Write-Host "`n  ===== Dao Remote Agent =====`n  Target: $server`n" -ForegroundColor Cyan',
   );
@@ -201,7 +203,7 @@ function getAgentScript() {
 
 // ==================== SENSE PAGE ====================
 function getSensePage() {
-  return require("./page.js")(PUBLIC_URL);
+  return require("./page.js")(_publicUrl);
 }
 
 // ==================== ANALYSIS ENGINE (BROWSER DIAG) ====================
@@ -562,15 +564,172 @@ function jsonReply(res, data, code) {
   res.end(JSON.stringify(data));
 }
 
+// ==================== UNIFIED AGENT SCRIPT (/go) ====================
+function getUnifiedAgentScript() {
+  var wsProto = _publicUrl.match(/\.lhr\.life/) ? "wss" : "ws";
+  var L = [];
+  L.push("# ═══════════ 道 · Unified Agent v3.0 — 万法归宗 ═══════════");
+  L.push('$ErrorActionPreference = "Continue"');
+  L.push('$wsUrl = "' + wsProto + "://" + _publicUrl + '/ws/agent"');
+  L.push(
+    'Write-Host "`n  ═══════════════════════════════════════" -ForegroundColor Cyan',
+  );
+  L.push('  Write-Host "  道 · Unified Agent v3.0" -ForegroundColor Cyan');
+  L.push('  Write-Host "  Target: ' + _publicUrl + '" -ForegroundColor Cyan');
+  L.push(
+    '  Write-Host "  ═══════════════════════════════════════`n" -ForegroundColor Cyan',
+  );
+  L.push(
+    "function Get-Info { @{ hostname=$env:COMPUTERNAME; user=$env:USERNAME; os=(Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue).Caption; isAdmin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); psVer=$PSVersionTable.PSVersion.ToString(); arch=$env:PROCESSOR_ARCHITECTURE } }",
+  );
+  L.push("function Send-Msg($ws, $obj) {");
+  L.push("  $j = $obj | ConvertTo-Json -Depth 5 -Compress");
+  L.push("  $b = [Text.Encoding]::UTF8.GetBytes($j)");
+  L.push(
+    "  $ws.SendAsync([ArraySegment[byte]]::new($b), [Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null",
+  );
+  L.push("}");
+  L.push("$attempt = 0");
+  L.push("while ($true) {");
+  L.push("  $attempt++");
+  L.push("  try {");
+  L.push("    $ws = [Net.WebSockets.ClientWebSocket]::new()");
+  L.push("    $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(15)");
+  L.push("    $ct = [Threading.CancellationToken]::None");
+  L.push(
+    '    Write-Host "[...] Connecting (#$attempt)..." -ForegroundColor Yellow',
+  );
+  L.push("    $ws.ConnectAsync([Uri]$wsUrl, $ct).GetAwaiter().GetResult()");
+  L.push("    $attempt = 0");
+  L.push('    Write-Host "[OK] Connected!" -ForegroundColor Green');
+  L.push('    Send-Msg $ws @{type="hello"; sysinfo=(Get-Info)}');
+  L.push("    $buf = [byte[]]::new(1048576)");
+  L.push("    while ($ws.State -eq [Net.WebSockets.WebSocketState]::Open) {");
+  L.push("      $seg = [ArraySegment[byte]]::new($buf)");
+  L.push("      $r = $ws.ReceiveAsync($seg, $ct).GetAwaiter().GetResult()");
+  L.push(
+    "      if ($r.MessageType -eq [Net.WebSockets.WebSocketMessageType]::Close) { break }",
+  );
+  L.push(
+    "      $n = $r.Count; while (-not $r.EndOfMessage) { $seg = [ArraySegment[byte]]::new($buf,$n,$buf.Length-$n); $r = $ws.ReceiveAsync($seg,$ct).GetAwaiter().GetResult(); $n += $r.Count }",
+  );
+  L.push(
+    "      $msg = [Text.Encoding]::UTF8.GetString($buf,0,$n) | ConvertFrom-Json",
+  );
+  L.push("      switch ($msg.type) {");
+  L.push('        "exec" {');
+  L.push('          Write-Host "[>] $($msg.cmd)" -ForegroundColor Yellow');
+  L.push(
+    "          try { $sw=[Diagnostics.Stopwatch]::StartNew(); $out=(Invoke-Expression $msg.cmd) 2>&1|Out-String; $sw.Stop(); $out=$out.TrimEnd()",
+  );
+  L.push(
+    '            if($out.Length -gt 102400){$out=$out.Substring(0,102400)+"`n...[truncated]"}',
+  );
+  L.push(
+    '            Write-Host "[<] $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green',
+  );
+  L.push(
+    '            Send-Msg $ws @{type="cmd_result";id=$msg.id;ok=$true;output=$out;ms=$sw.ElapsedMilliseconds}',
+  );
+  L.push(
+    '          } catch { Write-Host "[!] $_" -ForegroundColor Red; Send-Msg $ws @{type="cmd_result";id=$msg.id;ok=$false;output=$_.Exception.Message;ms=0} }',
+  );
+  L.push("        }");
+  L.push('        "get_sysinfo" {');
+  L.push(
+    "          try { $c=(Get-CimInstance Win32_Processor -EA SilentlyContinue|Select -First 1).Name; $o=Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue",
+  );
+  L.push(
+    '            $dk=Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue|%{@{drive=$_.DeviceID;sizeGB=[math]::Round($_.Size/1GB,1);freeGB=[math]::Round($_.FreeSpace/1GB,1)}}',
+  );
+  L.push(
+    '            $ad=Get-NetAdapter -EA SilentlyContinue|?{$_.Status -eq "Up"}|%{@{name=$_.Name;desc=$_.InterfaceDescription;speed=$_.LinkSpeed}}',
+  );
+  L.push(
+    '            Send-Msg $ws @{type="sysinfo";cpu=$c;os=$o.Caption+" "+$o.Version;ramGB=[math]::Round($o.TotalVisibleMemorySize/1MB,1);ramFreeGB=[math]::Round($o.FreePhysicalMemory/1MB,1);disks=$dk;adapters=$ad;processes=(Get-Process -EA SilentlyContinue).Count;uptime=[math]::Round((New-TimeSpan -Start $o.LastBootUpTime).TotalHours,1)}',
+  );
+  L.push(
+    '          } catch { Send-Msg $ws @{type="sysinfo";error=$_.Exception.Message} }',
+  );
+  L.push("        }");
+  L.push(
+    '        "ping" { Send-Msg $ws @{type="pong";time=(Get-Date -Format o)} }',
+  );
+  L.push("      }");
+  L.push("    }");
+  L.push('  } catch { Write-Host "[-] $_" -ForegroundColor Red }');
+  L.push("  $wait = [Math]::Min($attempt * 3, 30)");
+  L.push(
+    '  Write-Host "[...] Reconnect in ${wait}s..." -ForegroundColor Yellow; Start-Sleep $wait',
+  );
+  L.push("}");
+  return L.join("\r\n");
+}
+
+// ==================== PS-AGENT PROXY (single-port access) ====================
+function proxyToRelay(req, res, targetPath) {
+  var parsed = new URL("http://127.0.0.1:" + RELAY_PORT + targetPath);
+  var opts = {
+    hostname: "127.0.0.1",
+    port: RELAY_PORT,
+    path: parsed.pathname + parsed.search,
+    method: req.method,
+    headers: Object.assign({}, req.headers, {
+      host: "127.0.0.1:" + RELAY_PORT,
+    }),
+    timeout: 120000,
+  };
+  var proxy = http.request(opts, function (proxyRes) {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, { end: true });
+  });
+  proxy.on("error", function () {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({ error: "relay not reachable on port " + RELAY_PORT }),
+    );
+  });
+  req.pipe(proxy, { end: true });
+}
+
 const server = http.createServer(function (req, res) {
   const url = new URL(req.url, "http://localhost");
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET,POST",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type,Authorization",
     });
     res.end();
+    return;
+  }
+
+  // ── 道 · /go — unified smart agent (auto ws/wss) ──
+  if (req.method === "GET" && url.pathname === "/go") {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(getUnifiedAgentScript());
+    return;
+  }
+  // ── 道 · /status — system status JSON ──
+  if (req.method === "GET" && url.pathname === "/status") {
+    jsonReply(res, {
+      publicUrl: _publicUrl,
+      tunnel: _publicUrl.includes(".lhr.life"),
+      hub: {
+        port: PORT,
+        sense: senseData.connected,
+        agent: agentData.connected,
+      },
+      relay: { port: RELAY_PORT, url: bridge.relayUrl },
+      hostname: agentData.hostname,
+    });
+    return;
+  }
+  // ── ps-agent proxy: /relay/* → localhost:RELAY_PORT/* ──
+  if (url.pathname.startsWith("/relay/") || url.pathname === "/relay") {
+    var relayPath = url.pathname.replace(/^\/relay/, "") || "/";
+    if (url.search) relayPath += url.search;
+    proxyToRelay(req, res, relayPath);
     return;
   }
 
@@ -1100,18 +1259,48 @@ wss.on("connection", function (ws, req) {
 });
 
 // ==================== START ====================
-server.listen(PORT, "0.0.0.0", function () {
-  console.log("\n===== 道 · 远程中枢 [万法归宗] =====");
-  console.log("五感:  http://localhost:" + PORT);
-  console.log("Agent: irm http://" + PUBLIC_URL + "/agent.ps1 | iex");
-  console.log("大脑:  http://localhost:" + PORT + "/brain/state");
-  console.log("Relay: http://localhost:" + PORT + "/brain/relay");
-  console.log("外网:  http://" + PUBLIC_URL);
-  console.log("==================================\n");
-  // 启动时探测 Relay
-  bridge.findRelay().then(function (url) {
-    if (url) console.log("[bridge] PS Agent Relay: " + url);
-    else
-      console.log("[bridge] PS Agent Relay: not found (will retry on demand)");
+function setPublicUrl(url) {
+  _publicUrl = url;
+  console.log("[dao] PUBLIC_URL updated: " + url);
+}
+
+function start(port) {
+  port = port || PORT;
+  server.on("error", function (err) {
+    if (err.code === "EADDRINUSE") {
+      console.error("[hub] Port " + port + " already in use!");
+      console.error(
+        "[hub] Kill the existing process or use PORT=" +
+          (port + 1) +
+          " node dao.js",
+      );
+    } else {
+      console.error("[hub] Server error:", err.message);
+    }
   });
-});
+  server.listen(port, "0.0.0.0", function () {
+    var httpProto = _publicUrl.match(/\.lhr\.life/) ? "https" : "http";
+    console.log("\n===== 道 · 远程中枢 [万法归宗] =====");
+    console.log("五感:  http://localhost:" + port);
+    console.log("Agent: irm " + httpProto + "://" + _publicUrl + "/go | iex");
+    console.log("大脑:  http://localhost:" + port + "/brain/state");
+    console.log("状态:  http://localhost:" + port + "/status");
+    console.log("Relay: http://localhost:" + port + "/relay/");
+    console.log("外网:  " + httpProto + "://" + _publicUrl);
+    console.log("==================================\n");
+    bridge.findRelay().then(function (url) {
+      if (url) console.log("[bridge] PS Agent Relay: " + url);
+      else
+        console.log(
+          "[bridge] PS Agent Relay: not found (will retry on demand)",
+        );
+    });
+  });
+}
+
+// Direct run: node server.js
+if (require.main === module) {
+  start();
+}
+
+module.exports = { start: start, setPublicUrl: setPublicUrl };

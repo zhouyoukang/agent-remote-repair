@@ -32,6 +32,9 @@ Thumbs.db
 # Windsurf
 web/windsurf_deployment.yaml
 
+# Dao Kernel identity (per-device keypair, never share)
+.dao-remote/
+
 # Temp / binaries
 cloudflared.exe
 *.exe

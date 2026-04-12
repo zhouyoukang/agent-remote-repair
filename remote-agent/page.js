@@ -1,4 +1,4 @@
-module.exports = function (PUBLIC_URL) {
+module.exports = function (PUBLIC_URL, TOKEN) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -86,6 +86,39 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
 .diag-summary{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
 .ds-item{background:#0d1220;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
 .ds-item.ok{color:#4caf50}.ds-item.fail{color:#f44336}
+/* 投屏链路 */
+.scr-wrap{position:relative;background:#000;border-radius:12px;overflow:hidden;border:1px solid #1a2040;min-height:300px;display:flex;align-items:center;justify-content:center}
+.scr-wrap img{max-width:100%;max-height:70vh;object-fit:contain;display:block}
+.scr-wrap .placeholder{color:#445;text-align:center;padding:40px}
+.scr-overlay{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;z-index:10}
+.scr-dot{position:absolute;width:20px;height:20px;border-radius:50%;background:rgba(124,138,255,0.5);border:2px solid #7c8aff;transform:translate(-50%,-50%);pointer-events:none;animation:scrPulse .4s ease-out forwards}
+@keyframes scrPulse{0%{transform:translate(-50%,-50%) scale(.5);opacity:1}100%{transform:translate(-50%,-50%) scale(1.5);opacity:0}}
+.scr-bar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.scr-bar button{padding:6px 14px;background:#111828;border:1px solid #2a3050;color:#e0e0e0;border-radius:8px;cursor:pointer;font-size:12px;transition:all .15s}
+.scr-bar button:hover{background:#7c8aff;border-color:#7c8aff}
+.scr-bar button:active{transform:scale(.95)}
+.scr-bar button.active{background:#4caf50;border-color:#4caf50}
+.scr-bar .sep{width:1px;height:20px;background:#2a3050}
+.scr-info{font-size:11px;color:#556;margin-left:auto}
+.scr-src-pills{display:flex;gap:6px;margin:8px 0}
+.scr-src{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
+.scr-src.on{background:#0d1a0d;color:#4caf50}
+.scr-src.off{background:#1a0d0d;color:#f44336}
+.scr-trail{position:absolute;width:8px;height:8px;border-radius:50%;background:rgba(124,138,255,0.6);pointer-events:none;animation:scrTrailFade .6s ease-out forwards}
+@keyframes scrTrailFade{0%{opacity:.8;transform:scale(1)}100%{opacity:0;transform:scale(.3)}}
+.scr-line{position:absolute;background:rgba(124,138,255,0.4);height:2px;pointer-events:none;transform-origin:left center;animation:scrTrailFade .8s ease-out forwards}
+.scr-bar-row{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0;align-items:center}
+.scr-bar-row button{padding:4px 10px;background:#111828;border:1px solid #2a3050;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:11px;transition:all .15s}
+.scr-bar-row button:hover{background:#7c8aff;border-color:#7c8aff}
+.scr-bar-row button:active{transform:scale(.95)}
+.scr-bar-label{font-size:10px;color:#445;font-weight:600;text-transform:uppercase;letter-spacing:.5px;min-width:32px}
+.scr-fullscreen{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:9999;background:#000;margin:0;border:none;border-radius:0;min-height:100vh}
+.scr-fullscreen img{max-height:100vh}
+.scr-fs-btn{position:absolute;top:8px;right:8px;z-index:10001;padding:6px 10px;background:rgba(17,24,40,.8);border:1px solid #2a3050;color:#e0e0e0;border-radius:6px;cursor:pointer;font-size:14px;transition:all .15s}
+.scr-fs-btn:hover{background:#7c8aff;border-color:#7c8aff}
+.scr-toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(17,24,40,.9);color:#4caf50;padding:6px 16px;border-radius:8px;font-size:12px;z-index:10002;animation:scrToastIn .3s ease-out;pointer-events:none}
+@keyframes scrToastIn{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.scr-zoom-info{position:absolute;bottom:8px;left:8px;z-index:10001;padding:3px 8px;background:rgba(0,0,0,.6);color:#889;border-radius:4px;font-size:10px;pointer-events:none}
 </style>
 </head>
 <body>
@@ -99,15 +132,17 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
   </div>
   <div class="tabs">
     <button class="tab act" onclick="go('home',this)">首页</button>
+    <button class="tab" onclick="go('screen',this)">投屏</button>
     <button class="tab" onclick="go('term',this)">终端</button>
     <button class="tab" onclick="go('diag',this)">诊断</button>
     <button class="tab" onclick="go('sys',this)">系统</button>
+    <a href="/marble${TOKEN ? "?token=" + TOKEN : ""}" class="tab" style="text-decoration:none;color:inherit">3D世界</a>
   </div>
   <div id="p-home" class="page act">
     <div id="agentCard" class="card">
       <h3>连接 Agent（远程之手）</h3>
       <p>在目标电脑以<b>管理员身份</b>打开 PowerShell，粘贴以下命令：</p>
-      <div class="cmd-box" id="installCmd">irm ${/:\d+$/.test(PUBLIC_URL) ? "http" : "https"}://${PUBLIC_URL}/go | iex</div>
+      <div class="cmd-box" id="installCmd">irm ${/:\d+$/.test(PUBLIC_URL) ? "http" : "https"}://${PUBLIC_URL}/go${TOKEN ? "?token=" + TOKEN : ""} | iex</div>
       <button class="cbtn" onclick="cpEl('installCmd',this)">复制安装命令</button>
       <p style="margin-top:10px;font-size:11px;color:#445">${/:\d+$/.test(PUBLIC_URL) ? "Agent连接后解锁远程终端、系统信息等全部能力" : '<span style="color:#4caf50">● 公网接入已就绪</span> — 任何网络均可接入'}</p>
     </div>
@@ -134,15 +169,72 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
   <div id="p-diag" class="page">
     <div id="diagBox"><div class="card"><h3>网络诊断</h3><p>连接后自动运行浏览器级网络可达性测试</p></div></div>
   </div>
+  <div id="p-screen" class="page">
+    <div class="card">
+      <h3>远程投屏 · 反向控制</h3>
+      <div id="scrSrcPills" class="scr-src-pills"></div>
+      <div class="scr-bar">
+        <button onclick="scrCapture()" title="单次截屏">📸 截屏</button>
+        <button id="scrLiveBtn" onclick="scrToggleLive()" title="开启实时投屏">▶ 实时投屏</button>
+        <span class="sep"></span>
+        <button onclick="scrInput('home',{})" title="HOME键">🏠</button>
+        <button onclick="scrInput('back',{})" title="返回键">◀</button>
+        <button onclick="scrInput('recents',{})" title="最近任务">▦</button>
+        <button onclick="scrInput('lock',{})" title="锁屏">🔒</button>
+        <span class="sep"></span>
+        <button onclick="scrInput('volume/up',{})" title="音量+">🔊</button>
+        <button onclick="scrInput('volume/down',{})" title="音量-">🔉</button>
+        <span class="sep"></span>
+        <button onclick="scrSendText()" title="输入文本">⌨️ 文本</button>
+        <span class="sep"></span>
+        <button onclick="scrToggleFullscreen()" title="全屏">⛶ 全屏</button>
+        <span class="scr-info" id="scrInfo">等待连接...</span>
+      </div>
+      <div class="scr-bar-row">
+        <span class="scr-bar-label">系统</span>
+        <button onclick="scrInput('wake',{})" title="唤醒屏幕">💡 唤醒</button>
+        <button onclick="scrInput('power',{})" title="电源菜单">⏻ 电源</button>
+        <button onclick="scrInput('screenshot',{})" title="远程截图">📷 截图</button>
+        <button onclick="scrInput('notifications',{})" title="通知栏">🔔 通知</button>
+        <button onclick="scrInput('quicksettings',{})" title="快捷设置">⚙️ 快设</button>
+        <button onclick="scrInput('splitscreen',{})" title="分屏">◫ 分屏</button>
+      </div>
+      <div class="scr-bar-row">
+        <span class="scr-bar-label">媒体</span>
+        <button onclick="scrInput('media/play',{})" title="播放/暂停">⏯ 播放</button>
+        <button onclick="scrInput('media/next',{})" title="下一曲">⏭ 下曲</button>
+        <button onclick="scrInput('media/prev',{})" title="上一曲">⏮ 上曲</button>
+        <button onclick="scrInput('scroll',{delta:-120})" title="向上滚动">⬆ 上滚</button>
+        <button onclick="scrInput('scroll',{delta:120})" title="向下滚动">⬇ 下滚</button>
+      </div>
+      <div class="scr-bar-row" id="scrGhostBar" style="display:none">
+        <span class="scr-bar-label">Windows</span>
+        <button onclick="scrLaunchApp()" title="搜索并启动应用">🚀 启动</button>
+        <button onclick="scrInput('launch',{app:'explorer'})" title="文件管理器">📁 资管</button>
+        <button onclick="scrInput('key',{key:'alt+tab'})" title="Alt+Tab切换窗口">🔄 切窗</button>
+        <button onclick="scrInput('key',{key:'alt+f4'})" title="关闭当前窗口">✕ 关窗</button>
+        <button onclick="scrInput('key',{key:'lwin+d'})" title="显示桌面">🖥 桌面</button>
+        <button onclick="scrInput('key',{key:'lwin+e'})" title="打开资源管理器">📂 资管</button>
+        <button onclick="scrInput('key',{key:'ctrl+shift+escape'})" title="任务管理器">📊 任管</button>
+        <button onclick="scrInput('key',{key:'lwin+l'})" title="锁屏">🔐 锁屏</button>
+      </div>
+      <div class="scr-wrap" id="scrWrap">
+        <div class="placeholder" id="scrPlaceholder">Agent连接后点击「截屏」或「实时投屏」查看远程桌面<br><small style="color:#334">点击=tap · 拖拽=swipe · 键盘自动转发</small></div>
+        <img id="scrImg" style="display:none" alt="远程屏幕">
+        <div class="scr-overlay" id="scrOverlay" style="display:none"></div>
+      </div>
+    </div>
+  </div>
   <div id="p-sys" class="page">
     <div id="sysBox"><div class="empty">等待 Agent 发送系统信息...</div></div>
   </div>
 </div>
 <script>
 var ws=null,agentOk=false,diagRan=false,pendingCmds={},cmdId=0;
+var scrWs=null,scrLive=false,scrFrameCount=0,scrLastTime=0;
 function connect(){
   var proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(proto+'//'+location.host+'/ws/sense');
+  ws=new WebSocket(proto+'//'+location.host+'/ws/sense${TOKEN ? "?token=" + TOKEN : ""}');
   ws.onopen=function(){
     sPill('on','五感');
     ws.send(JSON.stringify({type:'hello',ua:navigator.userAgent,time:new Date().toISOString(),screen:screen.width+'x'+screen.height}));
@@ -326,6 +418,252 @@ function sendUserMsg(){
   ta.style.height='auto';
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ═══════ 投屏链路: 万法之资 · 适配一切 ═══════
+function scrConnect(){
+  if(scrWs&&scrWs.readyState<2)return;
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  scrWs=new WebSocket(proto+'//'+location.host+'/ws/screen${TOKEN ? "?token=" + TOKEN : ""}');
+  scrWs.onopen=function(){document.getElementById('scrInfo').textContent='投屏通道已连接'};
+  scrWs.onmessage=function(e){
+    try{
+      var m=JSON.parse(e.data);
+      if(m.type==='screen_frame'){
+        var img=document.getElementById('scrImg');
+        img.src=m.image;
+        img.style.display='block';
+        document.getElementById('scrPlaceholder').style.display='none';
+        document.getElementById('scrOverlay').style.display='block';
+        scrFrameCount++;
+        var now=Date.now();
+        var fps=scrLastTime?(1000/(now-scrLastTime)).toFixed(1):'--';
+        scrLastTime=now;
+        document.getElementById('scrInfo').textContent=
+          (m.width||'?')+'x'+(m.height||'?')+' | '+fps+' fps | '+scrFrameCount+' frames | '+(m.source||'agent');
+      }
+      if(m.type==='screen_stopped'){
+        scrLive=false;
+        var btn=document.getElementById('scrLiveBtn');
+        btn.textContent='▶ 实时投屏';btn.classList.remove('active');
+        document.getElementById('scrInfo').textContent='投屏已停止';
+      }
+      if(m.type==='input_result'){
+        scrShowToast(m.ok?(m.action+(m.via?' ('+m.via+')':'')):'输入失败: '+m.action);
+      }
+      if(m.type==='screen_sources'){
+        var pills=document.getElementById('scrSrcPills');
+        pills.innerHTML='';
+        var srcs=m.sources||{};
+        var hasGhost=false,hasAdbHub=false;
+        for(var k in srcs){
+          var s=srcs[k];
+          var sp=document.createElement('span');
+          sp.className='scr-src '+(s.status==='online'?'on':'off');
+          sp.textContent=k+(s.status==='online'?' ✓':' ✗');
+          pills.appendChild(sp);
+          if(k==='ghost'&&s.status==='online')hasGhost=true;
+          if(k==='dao'&&s.status==='online')hasGhost=true;
+          if(k==='adb_hub'&&s.status==='online')hasAdbHub=true;
+        }
+        var gb=document.getElementById('scrGhostBar');
+        if(gb)gb.style.display=hasGhost?'flex':'none';
+        // Agent截屏始终可用
+        var ag=document.createElement('span');
+        ag.className='scr-src '+(agentOk?'on':'off');
+        ag.textContent='agent-screencap'+(agentOk?' ✓':' ✗');
+        pills.appendChild(ag);
+      }
+      if(m.type==='screen_error'){
+        document.getElementById('scrInfo').textContent='截屏失败: '+m.error;
+      }
+    }catch(x){}
+  };
+  scrWs.onclose=function(){setTimeout(scrConnect,3000)};
+}
+function scrCapture(){
+  if(!scrWs||scrWs.readyState!==1){scrConnect();return}
+  scrWs.send(JSON.stringify({type:'request_capture'}));
+  document.getElementById('scrInfo').textContent='截屏中...';
+}
+function scrToggleLive(){
+  scrLive=!scrLive;
+  var btn=document.getElementById('scrLiveBtn');
+  if(scrLive){
+    btn.textContent='⏹ 停止';
+    btn.classList.add('active');
+    scrFrameCount=0;
+    // 通过主WS通知Agent开始连续截屏
+    if(ws&&ws.readyState===1){
+      ws.send(JSON.stringify({type:'start_screen_capture',interval:800}));
+    }
+    // 同时通过screen WS持续请求 (兜底)
+    scrLiveLoop();
+  }else{
+    btn.textContent='▶ 实时投屏';
+    btn.classList.remove('active');
+    if(ws&&ws.readyState===1){
+      ws.send(JSON.stringify({type:'stop_screen_capture'}));
+    }
+  }
+}
+function scrLiveLoop(){
+  if(!scrLive)return;
+  // 如果Agent端连续推送已激活, 不需要客户端轮询
+  // 但作为兜底保障, 每2秒请求一次
+  setTimeout(function(){
+    if(scrLive&&scrWs&&scrWs.readyState===1){
+      scrWs.send(JSON.stringify({type:'request_capture'}));
+    }
+    scrLiveLoop();
+  },2000);
+}
+function scrInput(action,params){
+  if(scrWs&&scrWs.readyState===1){
+    scrWs.send(JSON.stringify({type:'screen_input',action:action,params:params}));
+  }
+}
+function scrSendText(){
+  var t=prompt('输入要发送到远程设备的文本:');
+  if(t)scrInput('text',{text:t});
+}
+function scrLaunchApp(){
+  var app=prompt('输入要启动的应用名称:');
+  if(app)scrInput('launch',{app:app});
+}
+// ═══════ Toast 反馈 ═══════
+function scrShowToast(text){
+  var t=document.createElement('div');t.className='scr-toast';t.textContent=text;
+  document.body.appendChild(t);setTimeout(function(){t.remove()},1500);
+}
+// ═══════ 全屏切换 ═══════
+var scrFullscreen=false;
+function scrToggleFullscreen(){
+  var wrap=document.getElementById('scrWrap');
+  scrFullscreen=!scrFullscreen;
+  if(scrFullscreen){
+    wrap.classList.add('scr-fullscreen');
+    if(!document.getElementById('scrFsBtn')){
+      var btn=document.createElement('button');btn.id='scrFsBtn';btn.className='scr-fs-btn';
+      btn.textContent='✕ 退出';btn.onclick=scrToggleFullscreen;
+      wrap.appendChild(btn);
+    }
+  }else{
+    wrap.classList.remove('scr-fullscreen');
+    var btn=document.getElementById('scrFsBtn');if(btn)btn.remove();
+  }
+}
+// 万法之资: 触控手势 — 点击=tap, 拖拽=swipe, 长按=longpress, 触屏+鼠标统一
+(function(){
+  var overlay=document.getElementById('scrOverlay');
+  if(!overlay)return;
+  var dragStart=null,dragTime=0,longTimer=null;
+  var scrZoom=1,scrPanX=0,scrPanY=0,pinchStart=0;
+  function getRelXY(cx,cy){
+    var img=document.getElementById('scrImg');
+    if(!img||img.style.display==='none')return null;
+    var rect=img.getBoundingClientRect();
+    return{rx:(cx-rect.left)/rect.width,ry:(cy-rect.top)/rect.height,
+      w:parseInt(img.naturalWidth)||1920,h:parseInt(img.naturalHeight)||1080};
+  }
+  function getRelXYMouse(e){return getRelXY(e.clientX,e.clientY)}
+  function getRelXYTouch(t){return getRelXY(t.clientX,t.clientY)}
+  function showDot(rx,ry,cls){
+    var dot=document.createElement('div');dot.className=cls||'scr-dot';
+    dot.style.left=(rx*100)+'%';dot.style.top=(ry*100)+'%';
+    overlay.appendChild(dot);setTimeout(function(){dot.remove()},600);
+  }
+  function showLine(x1,y1,x2,y2){
+    var line=document.createElement('div');line.className='scr-line';
+    var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy)*overlay.offsetWidth/100;
+    var angle=Math.atan2(dy,dx)*180/Math.PI;
+    line.style.left=(x1*100)+'%';line.style.top=(y1*100)+'%';
+    line.style.width=len+'px';line.style.transform='rotate('+angle+'deg)';
+    overlay.appendChild(line);setTimeout(function(){line.remove()},800);
+  }
+  function beginDrag(cx,cy){
+    var p=getRelXY(cx,cy);if(!p)return;
+    dragStart={rx:p.rx,ry:p.ry,w:p.w,h:p.h,cx:cx,cy:cy};
+    dragTime=Date.now();
+    longTimer=setTimeout(function(){
+      if(dragStart){showDot(dragStart.rx,dragStart.ry,'scr-dot');
+        scrInput('longpress',{x:Math.round(dragStart.rx*dragStart.w),y:Math.round(dragStart.ry*dragStart.h),duration:800});
+        dragStart=null;}
+    },600);
+  }
+  function moveDrag(cx,cy){
+    if(!dragStart)return;
+    var dx=cx-dragStart.cx,dy=cy-dragStart.cy;
+    if(Math.abs(dx)+Math.abs(dy)>10&&longTimer){clearTimeout(longTimer);longTimer=null;}
+  }
+  function endDrag(cx,cy){
+    if(longTimer){clearTimeout(longTimer);longTimer=null;}
+    if(!dragStart)return;
+    var p=getRelXY(cx,cy);if(!p){dragStart=null;return;}
+    var dx=cx-dragStart.cx,dy=cy-dragStart.cy;
+    var dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist<8){
+      showDot(dragStart.rx,dragStart.ry);
+      scrInput('tap',{x:Math.round(dragStart.rx*dragStart.w),y:Math.round(dragStart.ry*dragStart.h)});
+    }else{
+      showLine(dragStart.rx,dragStart.ry,p.rx,p.ry);
+      var duration=Math.min(Math.max(Date.now()-dragTime,100),2000);
+      scrInput('swipe',{x1:Math.round(dragStart.rx*dragStart.w),y1:Math.round(dragStart.ry*dragStart.h),
+        x2:Math.round(p.rx*p.w),y2:Math.round(p.ry*p.h),duration:duration});
+    }
+    dragStart=null;
+  }
+  function cancelDrag(){
+    if(longTimer){clearTimeout(longTimer);longTimer=null;}
+    dragStart=null;
+  }
+  // 鼠标事件
+  overlay.addEventListener('mousedown',function(e){beginDrag(e.clientX,e.clientY)});
+  overlay.addEventListener('mousemove',function(e){moveDrag(e.clientX,e.clientY)});
+  overlay.addEventListener('mouseup',function(e){endDrag(e.clientX,e.clientY)});
+  overlay.addEventListener('mouseleave',cancelDrag);
+  // 触屏事件 — 万法之资: 适配手机/平板
+  overlay.addEventListener('touchstart',function(e){
+    if(e.touches.length===1){e.preventDefault();var t=e.touches[0];beginDrag(t.clientX,t.clientY)}
+    else if(e.touches.length===2){cancelDrag();pinchStart=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY)}
+  },{passive:false});
+  overlay.addEventListener('touchmove',function(e){
+    if(e.touches.length===1){e.preventDefault();var t=e.touches[0];moveDrag(t.clientX,t.clientY)}
+    else if(e.touches.length===2&&pinchStart>0){
+      e.preventDefault();
+      var dist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+      scrZoom=Math.max(1,Math.min(5,scrZoom*(dist/pinchStart)));
+      pinchStart=dist;
+      var img=document.getElementById('scrImg');
+      if(img)img.style.transform='scale('+scrZoom+')';
+    }
+  },{passive:false});
+  overlay.addEventListener('touchend',function(e){
+    if(e.changedTouches.length===1&&e.touches.length===0){
+      var t=e.changedTouches[0];endDrag(t.clientX,t.clientY);
+    }
+    if(e.touches.length<2)pinchStart=0;
+  });
+  overlay.addEventListener('touchcancel',function(){cancelDrag();pinchStart=0});
+  // 双击重置缩放
+  overlay.addEventListener('dblclick',function(){
+    scrZoom=1;var img=document.getElementById('scrImg');
+    if(img)img.style.transform='';
+  });
+})();
+// 键盘: 焦点在投屏页时转发按键
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&scrFullscreen){scrToggleFullscreen();return;}
+  var page=document.getElementById('p-screen');
+  if(!page||!page.classList.contains('act'))return;
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+  var keyMap={'Backspace':'KEYCODE_DEL','Enter':'KEYCODE_ENTER',
+    'ArrowUp':'KEYCODE_DPAD_UP','ArrowDown':'KEYCODE_DPAD_DOWN','ArrowLeft':'KEYCODE_DPAD_LEFT','ArrowRight':'KEYCODE_DPAD_RIGHT',
+    'Tab':'KEYCODE_TAB',' ':'KEYCODE_SPACE','Delete':'KEYCODE_FORWARD_DEL','Home':'KEYCODE_MOVE_HOME','End':'KEYCODE_MOVE_END'};
+  var kc=keyMap[e.key];
+  if(kc){e.preventDefault();scrInput('key',{key:kc});}
+  else if(e.key.length===1&&!e.ctrlKey&&!e.metaKey){e.preventDefault();scrInput('text',{text:e.key});}
+});
+scrConnect();
 connect();
 </script>
 </body>

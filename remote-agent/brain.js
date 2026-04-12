@@ -7,6 +7,13 @@
 const http = require("http");
 const BASE =
   process.env.BRAIN_URL || "http://localhost:" + (process.env.PORT || "3002");
+const TOKEN = process.env.PS_AGENT_MASTER_TOKEN || "";
+
+function authHeaders() {
+  var h = { "Content-Type": "application/json" };
+  if (TOKEN) h["Authorization"] = "Bearer " + TOKEN;
+  return h;
+}
 
 function post(path, data) {
   return new Promise((resolve, reject) => {
@@ -15,7 +22,7 @@ function post(path, data) {
       BASE + path,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
       },
       (res) => {
         let d = "";
@@ -37,8 +44,10 @@ function post(path, data) {
 
 function get(path) {
   return new Promise((resolve, reject) => {
+    var sep = path.indexOf("?") >= 0 ? "&" : "?";
+    var url = BASE + path + (TOKEN ? sep + "token=" + TOKEN : "");
     http
-      .get(BASE + path, (res) => {
+      .get(url, (res) => {
         let d = "";
         res.on("data", (c) => (d += c));
         res.on("end", () => {
@@ -131,9 +140,75 @@ async function main() {
         console.log("[" + m.time + "] " + m.text);
       });
     }
+  } else if (cmd === "screen" || cmd === "scr") {
+    const sub = process.argv[3] || "sources";
+    if (sub === "sources" || sub === "src") {
+      const r = await get("/screen/sources");
+      console.log("Available:", (r.available || []).join(", ") || "(none)");
+      var srcs = r.sources || {};
+      for (var k in srcs) {
+        console.log(
+          "  " + k + ": " + srcs[k].status + " " + (srcs[k].url || ""),
+        );
+      }
+      if (r.best) console.log("Best:", r.best.name, r.best.url);
+    } else if (sub === "capture" || sub === "cap") {
+      const mode = process.argv[4] || "auto";
+      const r = await get("/screen/capture?mode=" + mode);
+      if (r.ok) {
+        console.log("Capture OK (source: " + (r.source || "?") + ")");
+        if (r.image) console.log("Image: " + r.image.substring(0, 60) + "...");
+      } else {
+        console.error("FAIL:", r.error);
+      }
+    } else {
+      console.log("Usage: node brain.js screen <sources|capture> [mode]");
+    }
+  } else if (cmd === "input" || cmd === "i") {
+    const action = process.argv[3];
+    if (!action) {
+      console.log(
+        "Usage: node brain.js input <tap|swipe|key|text|home|back|...> [params as JSON]",
+      );
+      console.log("Examples:");
+      console.log("  node brain.js input home");
+      console.log('  node brain.js input tap \'{"x":540,"y":960}\'');
+      console.log('  node brain.js input text \'{"text":"hello"}\'');
+    } else {
+      var params = {};
+      if (process.argv[4]) {
+        try {
+          params = JSON.parse(process.argv[4]);
+        } catch (e) {
+          params = { text: process.argv[4] };
+        }
+      }
+      const r = await post("/input/" + action, params);
+      console.log(r.ok ? "OK" : "FAIL", JSON.stringify(r));
+    }
+  } else if (cmd === "status" || cmd === "st") {
+    const r = await get("/status");
+    console.log(JSON.stringify(r, null, 2));
+  } else if (cmd === "relay" || cmd === "r") {
+    const r = await get("/brain/relay");
+    if (r.ok) {
+      console.log("Relay:", r.relay);
+      console.log("Agents:", JSON.stringify(r.agents, null, 2));
+    } else {
+      console.log("No relay found");
+    }
+  } else if (cmd === "guardian" || cmd === "g") {
+    const action = arg || "diagnose";
+    console.log("Running guardian (" + action + ")...");
+    const r = await post("/brain/guardian", { action: action });
+    if (r.ok) {
+      console.log(r.output);
+    } else {
+      console.error("FAIL:", r.error || r.output);
+    }
   } else {
     console.log(
-      "Usage: node brain.js <exec|state|say|terminal|sysinfo|auto|messages> [args]",
+      "Usage: node brain.js <command> [args]\n\nCommands:\n  exec|x <cmd>       Execute command on agent\n  state|s             Get hub state\n  status|st           Get full system status\n  say <text>          Send message to sense UI\n  terminal|t [n]      Get last N terminal entries\n  sysinfo|si          Request system info from agent\n  auto|a              Run auto-diagnostics\n  messages|m [peek]   Get user messages\n  screen|scr <sub>    Screen: sources, capture [mode]\n  input|i <action>    Send input: tap, key, text, home, back, ...\n  relay|r             Check relay status\n  guardian|g [action]  Run desktop guardian",
     );
   }
 }

@@ -1,23 +1,20 @@
-// ============================================================
-// 道 · 万法归宗 Bridge  (dao_bridge.js)
-// 连接 WebSocket Agent Hub ↔ PS Agent Relay
-// 不变应万变: 自动发现Relay, 动态LAN探测, 公网兜底
-//
-// Usage:
-//   const bridge = require('./dao_bridge');
-//   await bridge.findRelay();        // → 'http://192.168.31.179:9910'
-//   await bridge.getAgents();        // → [{hostname, status, ...}]
-//   await bridge.execOnRelay('your-hostname', 'hostname');
-// ============================================================
+// ╔══════════════════════════════════════════════════════════╗
+// ║  道 · 万法归宗 Bridge  (dao_bridge.js)                   ║
+// ║  连接 WebSocket Agent Hub ↔ PS Agent Relay               ║
+// ║  不变应万变: 自动发现, 动态LAN探测, 公网兜底              ║
+// ║                                                          ║
+// ║  道核驱动: Token由DaoKernel签发, 端口由道核动态分配       ║
+// ║  去芜留菁: 移除硬编码默认值, 一切从运行时环境读取         ║
+// ╚══════════════════════════════════════════════════════════╝
 
 const http = require("http");
 const https = require("https");
 const os = require("os");
 
+// 道法自然: 端口/Token由dao.js注入环境, 不再硬编码默认值
 const RELAY_PORT = parseInt(process.env.RELAY_PORT || "9910", 10);
-const RELAY_TOKEN =
-  process.env.PS_AGENT_MASTER_TOKEN || "change-me-your-secret-token";
-const PUBLIC_RELAY = process.env.PUBLIC_RELAY || ""; // e.g. https://your-domain.com/ps-agent
+const RELAY_TOKEN = process.env.PS_AGENT_MASTER_TOKEN || "";
+const PUBLIC_RELAY = process.env.PUBLIC_RELAY || "";
 const PROBE_OCTETS = (process.env.PROBE_OCTETS || "1")
   .split(",")
   .map(function (s) {
@@ -257,10 +254,11 @@ async function getRelayHealth() {
 async function runGuardianViaRelay(hostname, action) {
   // Execute desktop_guardian.ps1 on a remote machine via the relay
   action = action || "diagnose";
+  var guardianPath = require("path")
+    .resolve(__dirname, "..", "desktop_guardian.ps1")
+    .replace(/\\/g, "\\\\");
   var guardianCmd = [
-    '$gp = "' +
-      __dirname.replace(/\\/g, "\\\\") +
-      '\\\\..\\\\desktop_guardian.ps1"',
+    '$gp = "' + guardianPath + '"',
     "if (Test-Path $gp) { & $gp -Action " + action + " }",
     'else { "desktop_guardian.ps1 not found at $gp" }',
   ].join("; ");

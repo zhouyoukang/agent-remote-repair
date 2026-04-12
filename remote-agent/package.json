@@ -1,15 +1,14 @@
 {
   "name": "remote-agent",
-  "version": "1.0.0",
+  "version": "6.0.0",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "brain": "node brain.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": ["remote", "agent", "screen", "control", "diagnostics"],
+  "license": "MIT",
+  "description": "道 · 远程中枢 — WebSocket Hub + 投屏链路 + 反向控制 + 诊断引擎",
   "dependencies": {
     "ws": "^8.19.0"
   }

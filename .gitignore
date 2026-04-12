@@ -36,5 +36,6 @@ web/windsurf_deployment.yaml
 .dao-remote/
 
 # Temp / binaries
+bin/
 cloudflared.exe
 *.exe

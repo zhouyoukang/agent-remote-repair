@@ -626,13 +626,10 @@ class DaoKernel {
         JSON.stringify(this.capability.audioCapture),
     );
 
-    // 分配端口: 优先3002(道法自然 — 匹配文档), 占用则动态
-    this._port = DaoEntropy.tryPort(3002) || DaoEntropy.portSync();
-    _log(
-      "[万物] 端口: " +
-        this._port +
-        (this._port === 3002 ? " (默认)" : " (动态分配)"),
-    );
+    // 分配端口: 默认3002(匹配文档), 由server.js EADDRINUSE自动重试
+    // 道法自然: 不在此处同步检测(Node22 listen异步), 信任运行时适配
+    this._port = 3002;
+    _log("[万物] 端口: " + this._port + " (默认, 冲突时自动递增)");
 
     this._awake = true;
     this._startTime = Date.now();

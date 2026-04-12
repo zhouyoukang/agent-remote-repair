@@ -27,7 +27,7 @@ npm install && npm start
 - 道核驱动: 动态端口/Token/指纹，无硬编码
 - 6 种投屏源自动发现: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏
 - 5 级输入路由自适应: ghost → InputRoutes → adb_hub → dao-remote → scrcpy → ADB兜底
-- 自适应公网隧道: cloudflared → ngrok → SSH(localhost.run)，有什么用什么
+- 自适应公网隧道: cloudflared(自动下载) → ngrok → SSH(localhost.run)，零配置零费用
 - 浏览器实时投屏 + 触控/键盘/文本反向控制
 
 ## 设计哲学

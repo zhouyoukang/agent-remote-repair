@@ -107,9 +107,9 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
     <div id="agentCard" class="card">
       <h3>连接 Agent（远程之手）</h3>
       <p>在目标电脑以<b>管理员身份</b>打开 PowerShell，粘贴以下命令：</p>
-      <div class="cmd-box" id="installCmd">irm ${PUBLIC_URL.match(/\\.lhr\\.life/) ? "https" : "http"}://${PUBLIC_URL}/go | iex</div>
+      <div class="cmd-box" id="installCmd">irm ${/:\d+$/.test(PUBLIC_URL) ? "http" : "https"}://${PUBLIC_URL}/go | iex</div>
       <button class="cbtn" onclick="cpEl('installCmd',this)">复制安装命令</button>
-      <p style="margin-top:10px;font-size:11px;color:#445">${PUBLIC_URL.match(/\\.lhr\\.life/) ? '<span style="color:#4caf50">● 公网隧道已连接</span> — 任何网络均可接入' : "Agent连接后解锁远程终端、系统信息等全部能力"}</p>
+      <p style="margin-top:10px;font-size:11px;color:#445">${/:\d+$/.test(PUBLIC_URL) ? "Agent连接后解锁远程终端、系统信息等全部能力" : '<span style="color:#4caf50">● 公网接入已就绪</span> — 任何网络均可接入'}</p>
     </div>
     <div id="agentInfo" style="display:none"></div>
     <div class="card" style="border-color:#7c8aff30">

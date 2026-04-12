@@ -50,17 +50,25 @@ function checkSSH() {
 
 function _createTunnel(localPort) {
   if (_stopped) return;
-  console.log("[tunnel] Connecting to localhost.run (port " + localPort + ")...");
+  console.log(
+    "[tunnel] Connecting to localhost.run (port " + localPort + ")...",
+  );
 
   _tunnelProcess = spawn(
     "ssh",
     [
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "ServerAliveInterval=30",
-      "-o", "ServerAliveCountMax=3",
-      "-o", "ExitOnForwardFailure=yes",
-      "-o", "LogLevel=ERROR",
-      "-R", "80:localhost:" + localPort,
+      "-o",
+      "StrictHostKeyChecking=no",
+      "-o",
+      "ServerAliveInterval=30",
+      "-o",
+      "ServerAliveCountMax=3",
+      "-o",
+      "ExitOnForwardFailure=yes",
+      "-o",
+      "LogLevel=ERROR",
+      "-R",
+      "80:localhost:" + localPort,
       "nokey@localhost.run",
     ],
     { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
@@ -71,8 +79,8 @@ function _createTunnel(localPort) {
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line) continue;
-      // localhost.run outputs lines like: https://XXXX.lhr.life
-      var match = line.match(/(https?:\/\/[^\s]+\.lhr\.life)/);
+      // Match tunnel URLs: localhost.run (*.lhr.life), serveo.net, or any HTTPS URL
+      var match = line.match(/(https:\/\/[a-z0-9][\w.-]+\.[a-z]{2,})/i);
       if (match) {
         var newUrl = match[1];
         if (newUrl !== _tunnelUrl) {
@@ -90,7 +98,11 @@ function _createTunnel(localPort) {
 
   _tunnelProcess.stderr.on("data", function (data) {
     var line = data.toString().trim();
-    if (line && !line.includes("Warning:") && !line.includes("Permanently added")) {
+    if (
+      line &&
+      !line.includes("Warning:") &&
+      !line.includes("Permanently added")
+    ) {
       console.log("[tunnel]", line);
     }
   });
@@ -106,7 +118,7 @@ function _createTunnel(localPort) {
     // Exponential backoff: 5s, 10s, 20s, max 60s
     var delay = _reconnecting ? Math.min(60000, 10000) : 5000;
     _reconnecting = true;
-    console.log("[tunnel] Reconnecting in " + (delay / 1000) + "s...");
+    console.log("[tunnel] Reconnecting in " + delay / 1000 + "s...");
     setTimeout(function () {
       _reconnecting = false;
       _createTunnel(localPort);
@@ -127,7 +139,9 @@ async function start(localPort) {
   var hasSSH = await checkSSH();
   if (!hasSSH) {
     console.log("[tunnel] SSH not available — skipping tunnel");
-    console.log("[tunnel] Install OpenSSH or use FRP/Cloudflare for public access");
+    console.log(
+      "[tunnel] Install OpenSSH or use FRP/Cloudflare for public access",
+    );
     return false;
   }
   _createTunnel(localPort);

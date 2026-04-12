@@ -7,6 +7,17 @@ const PORT = process.env.PORT || 3002;
 var _publicUrl = process.env.PUBLIC_URL || "localhost:" + PORT;
 var RELAY_PORT = parseInt(process.env.RELAY_PORT || "9910", 10);
 
+// 道法自然: 有端口=HTTP直连, 无端口=HTTPS(反代/隧道/域名) — 适配一切环境
+function isSecure() {
+  return !/:\d+$/.test(_publicUrl);
+}
+function httpProto() {
+  return isSecure() ? "https" : "http";
+}
+function wsProto() {
+  return isSecure() ? "wss" : "ws";
+}
+
 // ==================== STATE ====================
 let senseSocket = null;
 let agentSocket = null;
@@ -113,10 +124,15 @@ function forwardTerminal(id, cmd, output, ok) {
 function getAgentScript() {
   const L = [];
   L.push("# Dao Remote Agent v2.0");
-  L.push("# Run as Admin: irm http://" + _publicUrl + "/agent.ps1 | iex");
+  L.push(
+    "# Run as Admin: irm " +
+      httpProto() +
+      "://" +
+      _publicUrl +
+      "/agent.ps1 | iex",
+  );
   L.push('$ErrorActionPreference = "Continue"');
-  var wsProto = _publicUrl.match(/\.lhr\.life/) ? "wss" : "ws";
-  L.push('$server = "' + wsProto + "://" + _publicUrl + '/ws/agent"');
+  L.push('$server = "' + wsProto() + "://" + _publicUrl + '/ws/agent"');
   L.push(
     'Write-Host "`n  ===== Dao Remote Agent =====`n  Target: $server`n" -ForegroundColor Cyan',
   );
@@ -566,11 +582,10 @@ function jsonReply(res, data, code) {
 
 // ==================== UNIFIED AGENT SCRIPT (/go) ====================
 function getUnifiedAgentScript() {
-  var wsProto = _publicUrl.match(/\.lhr\.life/) ? "wss" : "ws";
   var L = [];
   L.push("# ═══════════ 道 · Unified Agent v3.0 — 万法归宗 ═══════════");
   L.push('$ErrorActionPreference = "Continue"');
-  L.push('$wsUrl = "' + wsProto + "://" + _publicUrl + '/ws/agent"');
+  L.push('$wsUrl = "' + wsProto() + "://" + _publicUrl + '/ws/agent"');
   L.push(
     'Write-Host "`n  ═══════════════════════════════════════" -ForegroundColor Cyan',
   );
@@ -714,7 +729,7 @@ const server = http.createServer(function (req, res) {
   if (req.method === "GET" && url.pathname === "/status") {
     jsonReply(res, {
       publicUrl: _publicUrl,
-      tunnel: _publicUrl.includes(".lhr.life"),
+      tunnel: isSecure(),
       hub: {
         port: PORT,
         sense: senseData.connected,
@@ -1279,14 +1294,14 @@ function start(port) {
     }
   });
   server.listen(port, "0.0.0.0", function () {
-    var httpProto = _publicUrl.match(/\.lhr\.life/) ? "https" : "http";
+    var proto = httpProto();
     console.log("\n===== 道 · 远程中枢 [万法归宗] =====");
     console.log("五感:  http://localhost:" + port);
-    console.log("Agent: irm " + httpProto + "://" + _publicUrl + "/go | iex");
+    console.log("Agent: irm " + proto + "://" + _publicUrl + "/go | iex");
     console.log("大脑:  http://localhost:" + port + "/brain/state");
     console.log("状态:  http://localhost:" + port + "/status");
     console.log("Relay: http://localhost:" + port + "/relay/");
-    console.log("外网:  " + httpProto + "://" + _publicUrl);
+    console.log("外网:  " + proto + "://" + _publicUrl);
     console.log("==================================\n");
     bridge.findRelay().then(function (url) {
       if (url) console.log("[bridge] PS Agent Relay: " + url);

@@ -46,7 +46,50 @@ function getLanIPs() {
       }
     }
   }
+  // 道法自然: 按可达性排序 — 真实LAN优先, 虚拟网卡靠后
+  // 192.168.x.x = 家庭/办公(最常见), 10.x = 企业/VPN, 172.16-31 = Docker/Hyper-V
+  ips.sort(function (a, b) {
+    return ipScore(a) - ipScore(b);
+  });
   return ips;
+}
+
+function ipScore(ip) {
+  if (/^192\.168\./.test(ip)) return 0; // 家庭/办公LAN — 最优
+  if (/^10\./.test(ip)) return 2; // 企业网/VPN — 可能是虚拟
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 3; // Docker/Hyper-V — 通常不可达
+  return 1; // 其他 — 中等
+}
+
+function getBestLanIP() {
+  // 最优: 解析路由表找默认出口网卡IP
+  try {
+    var out = require("child_process")
+      .execSync("route print 0.0.0.0", { timeout: 3000, windowsHide: true })
+      .toString();
+    var lines = out.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var parts = lines[i].trim().split(/\s+/);
+      // Windows route print: Network Destination  Netmask  Gateway  Interface  Metric
+      if (
+        parts.length >= 5 &&
+        parts[0] === "0.0.0.0" &&
+        parts[1] === "0.0.0.0"
+      ) {
+        var ifaceIP = parts[3];
+        if (
+          ifaceIP &&
+          /^\d+\.\d+\.\d+\.\d+$/.test(ifaceIP) &&
+          ifaceIP !== "0.0.0.0"
+        ) {
+          return ifaceIP;
+        }
+      }
+    }
+  } catch (e) {}
+  // 回退: 排序启发式
+  var ips = getLanIPs();
+  return ips.length > 0 ? ips[0] : null;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -92,8 +135,12 @@ function startRelay() {
   });
   relayProcess.on("error", function (err) {
     console.log("[relay!] Failed to start python: " + err.message);
-    console.log("[relay!] PS Agent Relay requires Python 3. Install from python.org");
-    console.log("[relay!] Hub will still work without Relay (WebSocket direct only)");
+    console.log(
+      "[relay!] PS Agent Relay requires Python 3. Install from python.org",
+    );
+    console.log(
+      "[relay!] Hub will still work without Relay (WebSocket direct only)",
+    );
   });
 }
 
@@ -107,8 +154,10 @@ function startHub() {
   process.env.PS_AGENT_MASTER_TOKEN = SHARED_TOKEN;
   process.env.RELAY_PORT = String(RELAY_PORT);
 
-  var lanIPs = getLanIPs();
-  var defaultPublic = lanIPs.length > 0 ? lanIPs[0] + ":" + HUB_PORT : "localhost:" + HUB_PORT;
+  var bestIP = getBestLanIP();
+  var defaultPublic = bestIP
+    ? bestIP + ":" + HUB_PORT
+    : "localhost:" + HUB_PORT;
   process.env.PUBLIC_URL = process.env.PUBLIC_URL || defaultPublic;
 
   var hub = require("./remote-agent/server");

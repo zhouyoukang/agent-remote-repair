@@ -1,37 +1,33 @@
 @echo off
-title Agent Remote Repair · Public Service
+title Agent Remote Repair v7.0
 echo ============================================
-echo   Agent Remote Repair Hub
-echo   Configure frpc.toml for your public URL
+echo   Agent Remote Repair Hub v7.0
+echo   dao.js 统一启动 (Hub + Relay + Tunnel)
 echo ============================================
 echo.
 
-:: Start remote-agent WebSocket hub (port 3002)
-echo [1/3] Starting remote-agent hub...
-start /B cmd /c "cd /d %~dp0remote-agent && node server.js"
-
-:: Wait for server startup
-timeout /t 3 /nobreak >nul
-
-:: Start PS Agent Relay (port 9910)
-echo [2/3] Starting PS Agent Relay...
-start /B cmd /c "cd /d %~dp0ps-agent && python ps_agent_server.py"
-
-:: Start FRP tunnel (optional — only if frpc.toml exists)
-if exist "%~dp0frpc.toml" (
-    echo [3/3] Starting FRP tunnel...
-    start /B frpc.exe -c %~dp0frpc.toml
-) else (
-    echo [3/3] Skipped FRP tunnel (frpc.toml not found, copy frpc.example.toml to frpc.toml)
+:: 前置检查: Node.js
+where node >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Node.js not found! Install from https://nodejs.org/
+    pause
+    exit /b 1
 )
 
+:: 安装依赖 (首次)
+if not exist "%~dp0node_modules" (
+    echo [1/2] Installing dependencies...
+    cd /d %~dp0 && npm install
+)
+
+:: 启动 (dao.js 自动管理 Hub + Relay + Tunnel)
+echo [2/2] Starting dao.js (Hub + Relay + Tunnel)...
+echo.
+cd /d %~dp0 && node dao.js
+
+:: dao.js 退出时提示
 echo.
 echo ============================================
-echo   Services started!
-echo   Local:  http://localhost:3002 (remote-agent)
-echo           http://localhost:9910 (ps-agent relay)
-echo   FRP:    Configure frpc.toml for public access
+echo   Services stopped.
 echo ============================================
-echo.
-echo Press any key to close this window (services continue in background)
-pause >nul
+pause

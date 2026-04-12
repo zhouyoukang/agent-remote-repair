@@ -3,7 +3,10 @@ const { WebSocketServer } = require("ws");
 const crypto = require("crypto");
 const os = require("os");
 const bridge = require("./dao_bridge");
-const { DaoKernel } = require("../dao_kernel");
+const { DaoKernel, DaoIdentity } = require("../dao_kernel");
+
+// 道核身份: 用于验证HMAC签名令牌 (与dao.js共享同一密钥文件)
+var _daoIdentity = new DaoIdentity();
 
 // ═══════════════════════════════════════════════════════════════
 // 道核注入 — 万物皆动, 一切从运行时涌现
@@ -94,12 +97,9 @@ function checkToken(req) {
     return true;
   var u = new URL(req.url || "", "http://localhost");
   var qToken = u.searchParams.get("token") || "";
-  // 道核签名令牌 (HMAC验证)
+  // 道核签名令牌 (HMAC验证 — 密码学安全)
   if (qToken && qToken.indexOf(".") > 0) {
-    try {
-      var parts = qToken.split(".", 2);
-      if (parts[0].length > 16 && parts[1].length >= 16) return true;
-    } catch (e) {}
+    if (_daoIdentity.verifyToken(qToken)) return true;
   }
   // 旧式共享令牌 (向后兼容)
   if (qToken === MASTER_TOKEN) return true;
@@ -107,7 +107,8 @@ function checkToken(req) {
   if (auth.startsWith("Bearer ")) {
     var bearerTok = auth.slice(7);
     if (bearerTok === MASTER_TOKEN) return true;
-    if (bearerTok.indexOf(".") > 0) return true;
+    if (bearerTok.indexOf(".") > 0 && _daoIdentity.verifyToken(bearerTok))
+      return true;
   }
   return false;
 }
@@ -1195,7 +1196,7 @@ function getUnifiedAgentScript(req) {
   }
   var L = [];
   L.push(
-    "# ═══════════ 道 · Unified Agent v6.0 — 万法之资 · 唯变所适 ═══════════",
+    "# ═══════════ 道 · Unified Agent v7.0 — 万法之资 · 唯变所适 ═══════════",
   );
   L.push('$ErrorActionPreference = "Continue"');
   L.push("$urls = @(");
@@ -1207,7 +1208,7 @@ function getUnifiedAgentScript(req) {
     'Write-Host "`n  ═══════════════════════════════════════" -ForegroundColor Cyan',
   );
   L.push(
-    'Write-Host "  道 · Unified Agent v6.0 — 万法之资 · 唯变所适" -ForegroundColor Cyan',
+    'Write-Host "  道 · Unified Agent v7.0 — 万法之资 · 唯变所适" -ForegroundColor Cyan',
   );
   L.push('Write-Host "  Source: ' + reqHost + '" -ForegroundColor Cyan');
   L.push('Write-Host "  Paths:  $($urls.Count)" -ForegroundColor Cyan');
@@ -1663,7 +1664,7 @@ const server = http.createServer(function (req, res) {
     jsonReply(res, {
       ok: true,
       service: "dao-remote-hub",
-      version: "6.0",
+      version: "7.0",
       uptime: process.uptime(),
       agents: agentSockets.size,
       sense: senseData.connected,
@@ -1777,7 +1778,7 @@ const server = http.createServer(function (req, res) {
       denyToken(res);
       return;
     }
-    // 道法自然: /agent.ps1 统一指向 /go (Unified Agent v6.0 含投屏+控制)
+    // 道法自然: /agent.ps1 统一指向 /go (Unified Agent v7.0 含投屏+控制)
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(getUnifiedAgentScript(req));
     return;
@@ -2536,16 +2537,24 @@ function setPublicUrl(url) {
   console.log("[dao] PUBLIC_URL updated: " + url);
 }
 
-function start(port) {
+function start(port, _retryCount) {
   port = port || PORT;
+  _retryCount = _retryCount || 0;
   server.on("error", function (err) {
     if (err.code === "EADDRINUSE") {
-      console.error("[hub] Port " + port + " already in use!");
-      console.error(
-        "[hub] Kill the existing process or use PORT=" +
-          (port + 1) +
-          " node dao.js",
-      );
+      server.removeAllListeners("error");
+      if (_retryCount < 5) {
+        var nextPort = port + 1;
+        console.log(
+          "[hub] Port " + port + " occupied, trying " + nextPort + "...",
+        );
+        start(nextPort, _retryCount + 1);
+      } else {
+        console.error(
+          "[hub] All ports " + (port - 5) + "-" + port + " occupied!",
+        );
+        console.error("[hub] Use PORT=<free_port> node dao.js");
+      }
     } else {
       console.error("[hub] Server error:", err.message);
     }

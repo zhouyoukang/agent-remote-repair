@@ -83,6 +83,20 @@ class DaoEntropy {
       srv.on("error", reject);
     });
   }
+  static tryPort(preferred) {
+    // 道法自然: 尝试指定端口, 可用则返回, 否则返回0
+    try {
+      var srv = net.createServer();
+      srv.listen(preferred, "127.0.0.1");
+      var addr = srv.address();
+      if (addr && addr.port === preferred) {
+        srv.close();
+        return preferred;
+      }
+      srv.close();
+    } catch (e) {}
+    return 0;
+  }
   static portSync() {
     // 道法自然: 同步分配 — 绑定0号端口让OS选择，立即释放
     var srv = net.createServer();
@@ -612,9 +626,13 @@ class DaoKernel {
         JSON.stringify(this.capability.audioCapture),
     );
 
-    // 分配端口 (动态)
-    this._port = DaoEntropy.portSync();
-    _log("[万物] 端口: " + this._port + " (动态分配)");
+    // 分配端口: 优先3002(道法自然 — 匹配文档), 占用则动态
+    this._port = DaoEntropy.tryPort(3002) || DaoEntropy.portSync();
+    _log(
+      "[万物] 端口: " +
+        this._port +
+        (this._port === 3002 ? " (默认)" : " (动态分配)"),
+    );
 
     this._awake = true;
     this._startTime = Date.now();

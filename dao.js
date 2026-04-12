@@ -185,7 +185,9 @@ function main() {
   console.log("");
   console.log("  身份:   " + kernel.identity.fingerprint);
   console.log("  LAN:    " + (kernel.discovery.localIPs.join(", ") || "none"));
-  console.log("  Hub:    :" + hubPort + " (动态)");
+  console.log(
+    "  Hub:    :" + hubPort + (hubPort === 3002 ? " (默认)" : " (动态)"),
+  );
   console.log("  Relay:  :" + relayPort + " (动态)");
   console.log(
     "  隧道:  " +

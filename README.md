@@ -5,13 +5,24 @@
 远程 Windows/Android 诊断、修复、**投屏**与**控制**系统。
 **一个命令启动一切，零配置，自动发现 6 种投屏/控制源，自动公网。**
 
+## 前置要求
+
+| 依赖 | 版本 | 说明 |
+|------|------|------|
+| **Node.js** | **≥ 18.0** | 必须（`fetch` / `crypto.randomUUID`） |
+| Python | ≥ 3.8 | 可选 — PS Agent Relay 需要，Hub 无 Python 也能独立运行 |
+| ADB | 任意 | 可选 — Android 控制/投屏需要 |
+
 ## 快速开始
 
 ```bash
 npm install && npm start
 ```
 
-就这样。没有了。
+就这样。浏览器打开 **`http://localhost:3002`** 即可使用五感控制台。
+
+> 端口默认 3002，若被占用自动递增 (3003, 3004...)，观察控制台输出确认实际端口。
+> Python 未安装时 Relay 不可用，Hub 仍以 WebSocket 直连模式正常运行。
 
 - 道核驱动: 动态端口/Token/指纹，无硬编码
 - 6 种投屏源自动发现: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏
@@ -113,12 +124,13 @@ npm install && npm start
 | `/relay/*` | PS Agent Relay 代理 |
 | `/brain/exec` | 远程执行命令 |
 | `/brain/auto` | 自动诊断 |
+| `/marble` | 3D 世界 Gaussian Splatting Viewer (需 `WLT_API_KEY`) |
 
 ## 环境变量（全部可选）
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PORT` | *(道核动态)* | Hub 端口 |
+| `PORT` | `3002` | Hub 端口 (默认3002, 占用则自动递增) |
 | `SCRCPY_HUB_PORT` | `8890` | scrcpy Hub 端口 |
 | `MJPEG_PORT` | `8081` | MJPEG 投屏端口 |
 | `INPUT_PORT` | `8084` | InputRoutes/ScreenStream 端口 |

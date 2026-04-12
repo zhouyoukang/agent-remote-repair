@@ -1,34 +1,57 @@
-# Agent Remote Repair Hub v7.0
+# Agent Remote Repair Hub v7.1
 
-> 道法自然 · 万法归宗 · 六源自适应 · 反向控制 · 诊断修复 · 用户彻底无为
+> 道法自然 · 万法归宗 · 零成本 · 零配置 · 零注册 · 用户彻底无为
 
 远程 Windows/Android 诊断、修复、**投屏**与**控制**系统。
-**一个命令启动一切，零配置，自动发现 6 种投屏/控制源，自动公网。**
+**一行命令，完全自动。无需安装任何东西。**
+
+## 一行启动 (小白专用)
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/zhouyoukang/agent-remote-repair/main/install.ps1 | iex
+```
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhouyoukang/agent-remote-repair/main/install.sh | bash
+```
+
+**就这样。** 脚本自动完成：
+1. **检测/安装 Node.js** — 无 Node 自动下载安装 (静默)
+2. **下载项目** — 无需 Git，从 GitHub ZIP 直接下载 (多镜像自适应)
+3. **安装依赖** — npm install (国内自动切 npmmirror)
+4. **启动系统** — Hub + Relay + **公网 HTTPS 隧道** 全自动
+5. **浏览器打开** `http://localhost:3002` 即可
+
+> 端口默认 3002，若被占用自动递增。cloudflared 自动下载(多镜像)，自动获取 HTTPS 公网 URL。
+> 整个过程 **零费用 · 零域名 · 零注册 · 零配置**。
+
+## 已有 Node.js？更快
+
+```bash
+git clone https://github.com/zhouyoukang/agent-remote-repair.git
+cd agent-remote-repair
+npm install && npm start
+```
 
 ## 前置要求
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| **Node.js** | **≥ 18.0** | 必须（`fetch` / `crypto.randomUUID`） |
+| **Node.js** | **≥ 18.0** | 一键脚本自动安装，无需手动 |
 | Python | ≥ 3.8 | 可选 — PS Agent Relay 需要，Hub 无 Python 也能独立运行 |
 | ADB | 任意 | 可选 — Android 控制/投屏需要 |
 
-## 快速开始
+## 自动能力
 
-```bash
-npm install && npm start
-```
-
-就这样。浏览器打开 **`http://localhost:3002`** 即可使用五感控制台。
-
-> 端口默认 3002，若被占用自动递增 (3003, 3004...)，观察控制台输出确认实际端口。
-> Python 未安装时 Relay 不可用，Hub 仍以 WebSocket 直连模式正常运行。
-
-- 道核驱动: 动态端口/Token/指纹，无硬编码
-- 6 种投屏源自动发现: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏
-- 5 级输入路由自适应: ghost → InputRoutes → adb_hub → dao-remote → scrcpy → ADB兜底
-- 自适应公网隧道: cloudflared(自动下载) → ngrok → SSH(localhost.run)，零配置零费用
-- 浏览器实时投屏 + 触控/键盘/文本反向控制
+- **零成本公网隧道**: cloudflared(自动下载) → ngrok → SSH(localhost.run)，零配置零费用
+- **道核驱动**: 动态端口/Token/指纹，无硬编码
+- **6 种投屏源自动发现**: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏
+- **5 级输入路由自适应**: ghost → InputRoutes → adb_hub → dao-remote → scrcpy → ADB兜底
+- **浏览器实时投屏** + 触控/键盘/文本反向控制
 
 ## 设计哲学
 

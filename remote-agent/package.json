@@ -1,15 +1,13 @@
 {
   "name": "remote-agent",
-  "version": "7.0.0",
+  "version": "7.1.0",
+  "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "cd .. && node dao.js",
     "brain": "node brain.js"
   },
   "keywords": ["remote", "agent", "screen", "control", "diagnostics"],
   "license": "MIT",
-  "description": "道 · 远程中枢 — WebSocket Hub + 投屏链路 + 反向控制 + 诊断引擎",
-  "dependencies": {
-    "ws": "^8.19.0"
-  }
+  "description": "道 · 远程中枢 — WebSocket Hub + 投屏链路 + 反向控制 + 诊断引擎 (依赖由根目录管理)"
 }

@@ -1,5 +1,6 @@
-# Dependencies
+# Dependencies (root node_modules only — remote-agent uses root deps)
 node_modules/
+remote-agent/node_modules/
 __pycache__/
 *.pyc
 

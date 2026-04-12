@@ -3,10 +3,12 @@ const { WebSocketServer } = require("ws");
 const crypto = require("crypto");
 const os = require("os");
 const bridge = require("./dao_bridge");
-const { DaoKernel, DaoIdentity } = require("../dao_kernel");
+const { DaoKernel, DaoIdentity, DaoRateLimit } = require("../dao_kernel");
 
-// 道核身份: 用于验证HMAC签名令牌 (与dao.js共享同一密钥文件)
+// 道核身份: Ed25519 非对称身份 (与dao.js共享同一密钥文件)
 var _daoIdentity = new DaoIdentity();
+// 速率限制: 20次/分钟/IP — 防暴力破解
+var _authLimiter = new DaoRateLimit(20, 60000);
 
 // ═══════════════════════════════════════════════════════════════
 // 道核注入 — 万物皆动, 一切从运行时涌现
@@ -88,28 +90,35 @@ const pendingCommands = new Map();
 let messageQueue = [];
 let hostsGuardTimer = null;
 
-// ==================== 安全通道: 道核鉴权 ====================
-// 柔弱胜刚强: 同时支持道核HMAC签名令牌和旧式共享令牌
+// ==================== 安全通道: Ed25519 道核鉴权 ====================
+// 签名令牌: 公钥验证 + 速率限制 + localhost豁免
 function checkToken(req) {
   if (!MASTER_TOKEN) return true;
   var ip = (req.socket || req.connection || {}).remoteAddress || "";
+  // localhost豁免
   if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1")
     return true;
-  var u = new URL(req.url || "", "http://localhost");
-  var qToken = u.searchParams.get("token") || "";
-  // 道核签名令牌 (HMAC验证 — 密码学安全)
-  if (qToken && qToken.indexOf(".") > 0) {
-    if (_daoIdentity.verifyToken(qToken)) return true;
+  // 速率限制: 远程访问防暴力破解
+  var clientIP = ip.replace(/^::ffff:/, "");
+  if (!_authLimiter.check(clientIP)) {
+    console.log("[auth] rate limited: " + clientIP);
+    return false;
   }
+  // 提取令牌: URL query 或 Authorization header
+  var token = "";
+  try {
+    var u = new URL(req.url || "", "http://localhost");
+    token = u.searchParams.get("token") || "";
+  } catch (e) {}
+  if (!token) {
+    var auth = (req.headers || {}).authorization || "";
+    if (auth.startsWith("Bearer ")) token = auth.slice(7);
+  }
+  if (!token) return false;
+  // Ed25519 签名令牌 (v2) 或 HMAC 令牌 (v1 迁移期)
+  if (_daoIdentity.verifyToken(token)) return true;
   // 旧式共享令牌 (向后兼容)
-  if (qToken === MASTER_TOKEN) return true;
-  var auth = req.headers.authorization || "";
-  if (auth.startsWith("Bearer ")) {
-    var bearerTok = auth.slice(7);
-    if (bearerTok === MASTER_TOKEN) return true;
-    if (bearerTok.indexOf(".") > 0 && _daoIdentity.verifyToken(bearerTok))
-      return true;
-  }
+  if (token === MASTER_TOKEN) return true;
   return false;
 }
 function denyToken(res) {
@@ -2563,7 +2572,7 @@ function start(port, _retryCount) {
     var proto = httpProto();
     var tokenQ = MASTER_TOKEN ? "?token=" + MASTER_TOKEN : "";
     var lanIPs = getAllLanIPs();
-    console.log("\n===== 道 · 远程中枢 [道核驱动] v7.0 =====");
+    console.log("\n===== 道 · 远程中枢 [Ed25519端到端] v8.0 =====");
     if (_daoFingerprint) console.log("身份:  " + _daoFingerprint);
     console.log("五感:  http://localhost:" + port);
     console.log(

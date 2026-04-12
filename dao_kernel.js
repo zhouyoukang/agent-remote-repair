@@ -23,6 +23,14 @@ const fs = require("fs");
 const path = require("path");
 const net = require("net");
 const { execSync } = require("child_process");
+var {
+  DaoKeys,
+  DaoSigner,
+  DaoToken,
+  DaoRateLimit,
+  DaoExchange,
+  DaoChannel,
+} = require("./dao_crypto");
 
 const IS_WIN = process.platform === "win32";
 
@@ -118,7 +126,9 @@ class DaoEntropy {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  太极 · Taiji · Identity — 每设备唯一密钥对，替代密码/PIN
+//  太极 · Taiji · Identity — Ed25519 非对称身份
+//  真正的非对称密码学: 私钥签名, 公钥验证, 不可伪造
+//  v2: Ed25519 替代 HMAC-SHA256 伪非对称方案
 // ═══════════════════════════════════════════════════════════════
 
 class DaoIdentity {
@@ -126,8 +136,10 @@ class DaoIdentity {
     this._dir = identityDir || path.join(os.homedir(), ".dao-remote");
     this._keyFile = path.join(this._dir, "identity.json");
     this.fingerprint = "";
-    this._seed = null;
-    this._pub = null;
+    this._signer = null;
+    this._pubRaw = null;
+    this._privRaw = null;
+    this._legacySeed = null; // v1 HMAC seed (迁移期向后兼容)
     this._loadOrGenerate();
   }
 
@@ -138,28 +150,51 @@ class DaoIdentity {
     if (fs.existsSync(this._keyFile)) {
       try {
         var data = JSON.parse(fs.readFileSync(this._keyFile, "utf-8"));
-        this._seed = Buffer.from(data.seed, "hex");
-        this._pub = Buffer.from(data.public, "hex");
-        this.fingerprint = data.fingerprint;
+        if (data.version >= 2) {
+          // v2: Ed25519 身份 — 道法自然
+          this._privRaw = Buffer.from(data.ed25519PrivateKey, "hex");
+          this._pubRaw = Buffer.from(data.ed25519PublicKey, "hex");
+          this.fingerprint = data.fingerprint;
+          this._signer = new DaoSigner(this._privRaw, this._pubRaw);
+          if (data.legacySeed) {
+            this._legacySeed = Buffer.from(data.legacySeed, "hex");
+          }
+          return;
+        }
+        // v1: HMAC seed — 迁移至 Ed25519
+        _log("[太极] 迁移身份至 Ed25519 (非对称)...");
+        this._legacySeed = Buffer.from(data.seed, "hex");
+        this._generateEd25519();
+        this._save();
+        _log("[太极] 身份已迁移: " + this.fingerprint + " (Ed25519)");
         return;
       } catch (e) {}
     }
-    // Generate new identity from entropy
-    this._seed = DaoEntropy.bytes(32);
-    this._pub = crypto
-      .createHash("sha256")
-      .update(Buffer.concat([Buffer.from("dao-pub-v1:"), this._seed]))
-      .digest();
-    this.fingerprint = crypto
-      .createHash("sha256")
-      .update(this._pub)
-      .digest("hex")
-      .slice(0, 16);
+    // 无身份 — 全新生成 Ed25519
+    this._generateEd25519();
+    this._save();
+    _log("[太极] 新身份已生成: " + this.fingerprint + " (Ed25519)");
+  }
+
+  _generateEd25519() {
+    var kp = DaoKeys.ed25519Generate();
+    this._privRaw = kp.privateKey;
+    this._pubRaw = kp.publicKey;
+    this.fingerprint = DaoKeys.fingerprint(this._pubRaw);
+    this._signer = new DaoSigner(this._privRaw, this._pubRaw);
+  }
+
+  _save() {
     var payload = JSON.stringify(
       {
-        seed: this._seed.toString("hex"),
-        public: this._pub.toString("hex"),
+        version: 2,
+        algorithm: "ed25519",
+        ed25519PrivateKey: this._privRaw.toString("hex"),
+        ed25519PublicKey: this._pubRaw.toString("hex"),
         fingerprint: this.fingerprint,
+        legacySeed: this._legacySeed
+          ? this._legacySeed.toString("hex")
+          : undefined,
         created: new Date().toISOString(),
         platform: process.platform,
         hostname: os.hostname(),
@@ -168,46 +203,32 @@ class DaoIdentity {
       2,
     );
     fs.writeFileSync(this._keyFile, payload, "utf-8");
-    _log("[太极] 新身份已生成: " + this.fingerprint);
   }
 
+  get publicKeyHex() {
+    return this._pubRaw.toString("hex");
+  }
+
+  // Ed25519 数字签名 (64 bytes — 不可伪造)
   sign(data) {
-    return crypto.createHmac("sha256", this._seed).update(data).digest();
+    return this._signer.sign(data);
   }
 
+  // 创建 Ed25519 签名令牌 (格式: dao2.payload.signature)
   createToken(ttl, meta) {
-    ttl = ttl || 3600;
-    var payload = JSON.stringify(
-      Object.assign(
-        {
-          fp: this.fingerprint,
-          exp: Math.floor(Date.now() / 1000) + ttl,
-          nonce: DaoEntropy.hex(8),
-        },
-        meta || {},
-      ),
-    );
-    var payloadBuf = Buffer.from(payload, "utf-8");
-    var sig = this.sign(payloadBuf).toString("hex").slice(0, 32);
-    return payloadBuf.toString("hex") + "." + sig;
+    return DaoToken.create(this._signer, ttl || 3600, meta);
   }
 
+  // 验证令牌: 先尝试 Ed25519 (v2), 再尝试 HMAC (v1 遗留)
   verifyToken(token) {
-    try {
-      var parts = token.split(".", 2);
-      var payloadBuf = Buffer.from(parts[0], "hex");
-      var expectedSig = this.sign(payloadBuf).toString("hex").slice(0, 32);
-      if (
-        !crypto.timingSafeEqual(Buffer.from(parts[1]), Buffer.from(expectedSig))
-      ) {
-        return null;
-      }
-      var data = JSON.parse(payloadBuf.toString("utf-8"));
-      if ((data.exp || 0) < Date.now() / 1000) return null;
-      return data;
-    } catch (e) {
-      return null;
+    // v2: Ed25519 签名令牌 — 只需公钥即可验证
+    var result = DaoToken.verify(token, this._pubRaw);
+    if (result) return result;
+    // v1: HMAC 令牌 (向后兼容 — 迁移期)
+    if (this._legacySeed) {
+      return DaoToken.verifyLegacy(token, this._legacySeed);
     }
+    return null;
   }
 }
 
@@ -659,9 +680,9 @@ class DaoKernel {
     this._publicUrl = (url || "").replace(/\/$/, "");
   }
 
-  // 道法自然: 生成Token兼容旧系统 — 既是HMAC签名令牌, 也可作为共享密钥使用
+  // Ed25519 签名令牌 — 7天有效, 每次重启自动刷新
   get masterToken() {
-    return this.identity.createToken(86400 * 365, { role: "master" });
+    return this.identity.createToken(86400 * 7, { role: "master" });
   }
 
   invite(ttl, device) {
@@ -753,6 +774,12 @@ module.exports = {
   DaoCapability: DaoCapability,
   DaoSession: DaoSession,
   DaoKernel: DaoKernel,
+  DaoKeys: DaoKeys,
+  DaoSigner: DaoSigner,
+  DaoToken: DaoToken,
+  DaoRateLimit: DaoRateLimit,
+  DaoExchange: DaoExchange,
+  DaoChannel: DaoChannel,
   _log: _log,
   _sh: _sh,
 };

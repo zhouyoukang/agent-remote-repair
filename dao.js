@@ -174,13 +174,13 @@ function main() {
   // 柔弱胜刚强: 用户可覆盖端口，否则用道核动态分配
   var hubPort = OVERRIDE_PORT || kernel.port;
   var relayPort = DaoEntropy.portSync();
-  // 道核签名令牌 — 替代硬编码共享密码
-  var token = kernel.identity.createToken(86400 * 365, { role: "master" });
+  // Ed25519 签名令牌 — 7天有效, 重启自动刷新 (替代硬编码共享密码)
+  var token = kernel.identity.createToken(86400 * 7, { role: "master" });
 
   console.log("");
   console.log("  ╔══════════════════════════════════════════════════════╗");
-  console.log("  ║   道 · Agent Remote Repair Hub v7.0                  ║");
-  console.log("  ║   道核驱动 · 软编码一切 · 唯变所适 · 万法归宗        ║");
+  console.log("  ║   道 · Agent Remote Repair Hub v8.0                  ║");
+  console.log("  ║   Ed25519端到端 · 道核驱动 · 唯变所适 · 万法归宗    ║");
   console.log("  ╚══════════════════════════════════════════════════════╝");
   console.log("");
   console.log("  身份:   " + kernel.identity.fingerprint);

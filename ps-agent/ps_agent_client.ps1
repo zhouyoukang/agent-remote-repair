@@ -1,35 +1,40 @@
-# ============================================================
-# PowerShell Agent Client v2.0
-# Connect to any PS Agent Relay server and execute commands remotely.
+﻿# ============================================================
+# 公网 PowerShell Agent Client v2.0
+# 道生一 · 一命接万机 — 任意公网电脑，一条命令，全权掌控
 #
-# Usage:
-#   .\ps_agent_client.ps1 -Server http://your-server:9910
-#   .\ps_agent_client.ps1 -Server https://your-domain.com/ps-agent
+# 用法1 (公网一键·推荐): irm https://aiotvr.xyz/ps-agent/bootstrap.ps1 | iex
+# 用法2 (默认云端):     .\ps_agent_client.ps1
+# 用法3 (指定服务器):   .\ps_agent_client.ps1 -Server http://192.168.31.141:9910
+# 用法4 (本地调试):     .\ps_agent_client.ps1 -Server http://localhost:9910
 #
-# Supported command types:
-#   shell          Execute any PowerShell command
-#   screenshot     Capture screen
-#   sysinfo        Detailed system information
-#   process_list   Process list
-#   process_kill   Kill process
-#   file_list      Directory listing
-#   file_read      Read/download file
-#   file_write     Write/upload file
-#   registry_read  Read registry
-#   service_list   Service list
-#   network_info   Network details
-#   env_vars       Environment variables
-#   installed_apps Installed software
-#   scheduled_tasks Scheduled tasks
-#   clipboard      Clipboard content
-#   display_info   Display info
-#   wifi_profiles  WiFi profiles
-#   firewall_rules Firewall rules
-#   power_plan     Power plan
+# 可用环境变量覆盖:
+#   $env:PS_AGENT_SERVER = 'http://x.x.x.x:9910'    # 优先级高于 -Server 默认
+#
+# 支持的命令类型:
+#   shell          执行任意PowerShell命令
+#   screenshot     截取屏幕
+#   sysinfo        系统详细信息
+#   process_list   进程列表
+#   process_kill   结束进程
+#   file_list      目录列表
+#   file_read      读取/下载文件
+#   file_write     写入/上传文件
+#   registry_read  读注册表
+#   service_list   服务列表
+#   network_info   网络详情
+#   env_vars       环境变量
+#   installed_apps 已装软件
+#   scheduled_tasks 计划任务
+#   clipboard      剪贴板内容
+#   audio_devices  音频设备
+#   display_info   显示器信息
+#   wifi_profiles  WiFi配置
+#   firewall_rules 防火墙规则
+#   power_plan     电源计划
 # ============================================================
 
 param(
-    [Parameter(Mandatory)][string]$Server,
+    [string]$Server = $(if ($env:PS_AGENT_SERVER) { $env:PS_AGENT_SERVER } else { 'https://aiotvr.xyz/ps-agent' }),
     [int]$PollTimeout = 30,
     [switch]$Verbose
 )
@@ -37,14 +42,13 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 
-$Server = $Server.TrimEnd('/')
 $POLL_URL      = "$Server/api/poll"
 $CONNECT_URL   = "$Server/api/connect"
 $RESULT_URL    = "$Server/api/result"
 $HEARTBEAT_URL = "$Server/api/heartbeat"
 
 # ═══════════════════════════════════════════════════════════
-# System Info Collection
+# 系统信息收集
 # ═══════════════════════════════════════════════════════════
 
 function Get-AgentSysInfo {
@@ -84,17 +88,19 @@ function Get-AgentSysInfo {
 }
 
 # ═══════════════════════════════════════════════════════════
-# Safe JSON Send (handles large payloads)
+# 安全的JSON发送 (处理大payload)
 # ═══════════════════════════════════════════════════════════
 
 function Send-JsonSafe {
     param([string]$Url, [hashtable]$Body, [int]$TimeoutSec = 30)
     $json = $Body | ConvertTo-Json -Depth 10 -Compress
     if ($json.Length -gt 8MB) {
+        # Truncate output to prevent OOM
         if ($Body.result -and $Body.result.stdout) {
             $Body.result.stdout = $Body.result.stdout.Substring(0, [Math]::Min($Body.result.stdout.Length, 500000)) + "`n... [TRUNCATED, total $($json.Length) bytes]"
         }
         if ($Body.result -and $Body.result.screenshot_base64 -and $Body.result.screenshot_base64.Length -gt 6MB) {
+            # Re-capture at lower quality
             $Body.result.error = "Screenshot too large ($([math]::Round($json.Length/1MB,1))MB), try lower resolution"
             $Body.result.Remove('screenshot_base64')
         }
@@ -104,7 +110,7 @@ function Send-JsonSafe {
 }
 
 # ═══════════════════════════════════════════════════════════
-# Command Executor (full-featured)
+# 命令执行器 (全功能)
 # ═══════════════════════════════════════════════════════════
 
 function Invoke-AgentCommand($cmd) {
@@ -117,6 +123,8 @@ function Invoke-AgentCommand($cmd) {
             $command = $payload.command
             Write-Host "  [>] shell: $command" -ForegroundColor DarkCyan
             try {
+                # In-process execution via PowerShell API (no child process spawn)
+                # Avoids hangs in ScheduledTask/S4U/non-interactive contexts
                 $ps = [PowerShell]::Create()
                 $ps.AddScript($command) | Out-Null
                 $handle = $ps.BeginInvoke()
@@ -150,6 +158,7 @@ function Invoke-AgentCommand($cmd) {
                 $g = [System.Drawing.Graphics]::FromImage($bmp)
                 $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
 
+                # Scale down to reduce size
                 $newW = [int]($bounds.Width * $scale / 100)
                 $newH = [int]($bounds.Height * $scale / 100)
                 $scaled = New-Object System.Drawing.Bitmap($newW, $newH)
@@ -158,6 +167,7 @@ function Invoke-AgentCommand($cmd) {
                 $g2.DrawImage($bmp, 0, 0, $newW, $newH)
 
                 $ms = New-Object System.IO.MemoryStream
+                # Use JPEG for smaller size
                 $jpegCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
                 $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
                 $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 60L)
@@ -299,6 +309,9 @@ function Invoke-AgentCommand($cmd) {
                 dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                     ForEach-Object { @{ iface=$_.InterfaceAlias; dns=$_.ServerAddresses } })
                 connections_count = (Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Measure-Object).Count
+                routes = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -First 20 |
+                    ForEach-Object { @{ dest=$_.DestinationPrefix; next=$_.NextHop; iface=$_.InterfaceAlias } })
             }
         }
 
@@ -360,6 +373,7 @@ function Invoke-AgentCommand($cmd) {
                     screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
                         @{ name=$_.DeviceName; primary=$_.Primary; width=$_.Bounds.Width; height=$_.Bounds.Height; bpp=$_.BitsPerPixel }
                     })
+                    dpi = & { try { (Get-ItemProperty 'HKCU:\Control Panel\Desktop\WindowMetrics' -ErrorAction Stop).AppliedDPI } catch { 96 } }
                 }
             } catch { $result = @{ error = $_.Exception.Message } }
         }
@@ -367,13 +381,13 @@ function Invoke-AgentCommand($cmd) {
         'wifi_profiles' {
             Write-Host "  [>] wifi_profiles" -ForegroundColor DarkCyan
             try {
-                $profiles = netsh wlan show profiles 2>&1 | Select-String 'All User Profile' |
+                $profiles = netsh wlan show profiles 2>&1 | Select-String '所有用户配置文件|All User Profile' |
                     ForEach-Object { ($_ -split ':')[1].Trim() }
                 $details = @()
                 foreach ($p in $profiles | Select-Object -First 30) {
                     $info = netsh wlan show profile name="$p" key=clear 2>&1
-                    $key = ($info | Select-String 'Key Content' | ForEach-Object { ($_ -split ':')[1].Trim() })
-                    $auth = ($info | Select-String 'Authentication' | Select-Object -First 1 | ForEach-Object { ($_ -split ':')[1].Trim() })
+                    $key = ($info | Select-String '关键内容|Key Content' | ForEach-Object { ($_ -split ':')[1].Trim() })
+                    $auth = ($info | Select-String '身份验证|Authentication' | Select-Object -First 1 | ForEach-Object { ($_ -split ':')[1].Trim() })
                     $details += @{ name=$p; password=$key; auth=$auth }
                 }
                 $result = @{ profiles = $details; count = $details.Count }
@@ -400,12 +414,38 @@ function Invoke-AgentCommand($cmd) {
             } catch { $result = @{ error = $_.Exception.Message } }
         }
 
+        'startup_items' {
+            Write-Host "  [>] startup_items" -ForegroundColor DarkCyan
+            $result = @{
+                registry = @(
+                    Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } |
+                        ForEach-Object { @{ name=$_.Name; command=$_.Value; scope='CurrentUser' } } }
+                ) + @(
+                    Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } |
+                        ForEach-Object { @{ name=$_.Name; command=$_.Value; scope='LocalMachine' } } }
+                )
+                startup_folder = @(Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -ErrorAction SilentlyContinue |
+                    ForEach-Object { @{ name=$_.Name; path=$_.FullName } })
+            }
+        }
+
+        'share_list' {
+            Write-Host "  [>] share_list" -ForegroundColor DarkCyan
+            $result = @{
+                shares = @(Get-SmbShare -ErrorAction SilentlyContinue |
+                    ForEach-Object { @{ name=$_.Name; path=$_.Path; description=$_.Description } })
+            }
+        }
+
         default {
             $result = @{ error = "Unknown command type: $type"; supported_types = @(
                 'shell','screenshot','sysinfo','process_list','process_kill',
                 'file_list','file_read','file_write','registry_read','service_list',
                 'network_info','env_vars','installed_apps','scheduled_tasks',
-                'clipboard','display_info','wifi_profiles','firewall_rules','power_plan'
+                'clipboard','display_info','wifi_profiles','firewall_rules',
+                'power_plan','startup_items','share_list'
             )}
         }
     }
@@ -413,40 +453,45 @@ function Invoke-AgentCommand($cmd) {
 }
 
 # ═══════════════════════════════════════════════════════════
-# Main
+# 主程序
 # ═══════════════════════════════════════════════════════════
 
 Write-Host ""
-Write-Host "  ========================================" -ForegroundColor Cyan
-Write-Host "    PowerShell Agent Client v2.0" -ForegroundColor Cyan
-Write-Host "  ========================================" -ForegroundColor Cyan
+Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║  ☰ 公网 PowerShell Agent v1.0               ║" -ForegroundColor Cyan
+Write-Host "  ║  道生一 · 一命接万机                          ║" -ForegroundColor Cyan
+Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Host "[*] Collecting system info..." -ForegroundColor Gray
+# 收集系统信息
+Write-Host "[*] 收集系统信息..." -ForegroundColor Gray
 $sysinfo = Get-AgentSysInfo
-Write-Host "[*] Host: $($sysinfo.hostname) | IP: $($sysinfo.public_ip) | OS: $($sysinfo.os_version)" -ForegroundColor Gray
+Write-Host "[*] 主机: $($sysinfo.hostname) | IP: $($sysinfo.public_ip) | OS: $($sysinfo.os_version)" -ForegroundColor Gray
 Write-Host "[*] CPU: $($sysinfo.cpu_name) | RAM: $($sysinfo.ram_total_gb)GB | GPU: $($sysinfo.gpu_name)" -ForegroundColor Gray
 
-Write-Host "[*] Connecting to: $Server" -ForegroundColor Yellow
+# 连接服务器
+Write-Host "[*] 连接服务器: $Server" -ForegroundColor Yellow
 try {
     $regBody = @{ sysinfo = $sysinfo } | ConvertTo-Json -Depth 5
     $reg = Invoke-RestMethod -Uri $CONNECT_URL -Method POST -Body $regBody -ContentType 'application/json; charset=utf-8' -TimeoutSec 15
 } catch {
-    Write-Host "[!] Connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "[!] Server: $Server" -ForegroundColor Red
+    Write-Host "[!] 连接失败: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[!] 请确认服务器地址正确: $Server" -ForegroundColor Red
+    Write-Host "[!] 如果是公网模式，请确认 FRP 隧道已开启" -ForegroundColor Red
     return
 }
 
 $AGENT_ID = $reg.agent_id
 $TOKEN    = $reg.token
-Write-Host "[+] Registered! Agent ID: $AGENT_ID" -ForegroundColor Green
-Write-Host "[+] Server time: $($reg.server_time)" -ForegroundColor Gray
-Write-Host "[+] Waiting for commands... (Ctrl+C to exit)" -ForegroundColor Green
+Write-Host "[+] 注册成功!" -ForegroundColor Green
+Write-Host "[+] Agent ID: $AGENT_ID" -ForegroundColor Green
+Write-Host "[+] 服务器时间: $($reg.server_time)" -ForegroundColor Gray
+Write-Host "[+] 等待命令中... (Ctrl+C 退出)" -ForegroundColor Green
 Write-Host ""
 
-# Heartbeat background timer
+# 心跳后台任务
 $heartbeatTimer = New-Object System.Timers.Timer
-$heartbeatTimer.Interval = 30000
+$heartbeatTimer.Interval = 30000  # 30秒
 $heartbeatTimer.AutoReset = $true
 $heartbeatAction = {
     try {
@@ -457,24 +502,24 @@ $heartbeatAction = {
 Register-ObjectEvent -InputObject $heartbeatTimer -EventName Elapsed -Action $heartbeatAction | Out-Null
 $heartbeatTimer.Start()
 
-# Auto re-register on token expiry
+# 自动重注册 (服务器重启时token失效)
 function Invoke-ReRegister {
-    Write-Host "[*] Token expired, re-registering..." -ForegroundColor Yellow
+    Write-Host "[*] 服务器token失效，重新注册..." -ForegroundColor Yellow
     $script:sysinfo = Get-AgentSysInfo
     try {
         $regBody = @{ sysinfo = $script:sysinfo } | ConvertTo-Json -Depth 5
         $reg = Invoke-RestMethod -Uri $CONNECT_URL -Method POST -Body $regBody -ContentType 'application/json; charset=utf-8' -TimeoutSec 15
         $script:AGENT_ID = $reg.agent_id
         $script:TOKEN    = $reg.token
-        Write-Host "[+] Re-registered! Agent ID: $($script:AGENT_ID)" -ForegroundColor Green
+        Write-Host "[+] 重新注册成功! Agent ID: $($script:AGENT_ID)" -ForegroundColor Green
         return $true
     } catch {
-        Write-Host "[!] Re-register failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] 重新注册失败: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
 
-# Main loop: long-poll
+# 主循环: 长轮询
 $reconnect_count = 0
 $total_commands = 0
 
@@ -489,7 +534,7 @@ try {
                 foreach ($cmd in $poll.commands) {
                     $total_commands++
                     $ts = Get-Date -Format 'HH:mm:ss'
-                    Write-Host "[$ts] #$total_commands Command: $($cmd.type) ($($cmd.cmd_id))" -ForegroundColor Cyan
+                    Write-Host "[$ts] #$total_commands 收到命令: $($cmd.type) ($($cmd.cmd_id))" -ForegroundColor Cyan
 
                     $sw = [System.Diagnostics.Stopwatch]::StartNew()
                     $result = Invoke-AgentCommand $cmd
@@ -497,6 +542,7 @@ try {
 
                     $result['execution_time_ms'] = $sw.ElapsedMilliseconds
 
+                    # 提交结果
                     try {
                         $resultBody = @{
                             agent_id = $AGENT_ID
@@ -505,29 +551,32 @@ try {
                             result   = $result
                         }
                         Send-JsonSafe -Url $RESULT_URL -Body $resultBody -TimeoutSec 30
-                        Write-Host "  [+] Result submitted ($($sw.ElapsedMilliseconds)ms)" -ForegroundColor Green
+                        Write-Host "  [+] 结果已提交 (${($sw.ElapsedMilliseconds)}ms)" -ForegroundColor Green
                     } catch {
-                        Write-Host "  [!] Submit failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "  [!] 提交失败: $($_.Exception.Message)" -ForegroundColor Red
                     }
                 }
             }
         } catch [System.Net.WebException] {
+            # Timeout is normal for long-polling
             if ($_.Exception.Status -eq 'Timeout') { continue }
+            # 401 = token expired (server restarted) → re-register
             $resp = $_.Exception.Response
             if ($resp -and [int]$resp.StatusCode -eq 401) {
                 if (Invoke-ReRegister) { $reconnect_count = 0; continue }
             }
             $reconnect_count++
             $wait = [Math]::Min($reconnect_count * 5, 60)
-            Write-Host "[!] Disconnected ($($_.Exception.Message)), retry in ${wait}s (#$reconnect_count)..." -ForegroundColor Yellow
+            Write-Host "[!] 连接断开 ($($_.Exception.Message))，${wait}秒后重连 (#$reconnect_count)..." -ForegroundColor Yellow
             Start-Sleep -Seconds $wait
         } catch {
+            # 检查是否为401 (不同PS版本异常类型不同)
             if ($_.Exception.Message -match '401|Unauthorized') {
                 if (Invoke-ReRegister) { $reconnect_count = 0; continue }
             }
             $reconnect_count++
             $wait = [Math]::Min($reconnect_count * 5, 60)
-            Write-Host "[!] Error: $($_.Exception.Message), retry in ${wait}s (#$reconnect_count)..." -ForegroundColor Yellow
+            Write-Host "[!] 错误: $($_.Exception.Message)，${wait}秒后重连 (#$reconnect_count)..." -ForegroundColor Yellow
             Start-Sleep -Seconds $wait
         }
     }
@@ -535,5 +584,5 @@ try {
     $heartbeatTimer.Stop()
     $heartbeatTimer.Dispose()
     Get-EventSubscriber | Unregister-Event -ErrorAction SilentlyContinue
-    Write-Host "`n[*] Agent stopped (executed $total_commands commands)" -ForegroundColor Yellow
+    Write-Host "`n[*] Agent 已退出 (共执行 $total_commands 条命令)" -ForegroundColor Yellow
 }

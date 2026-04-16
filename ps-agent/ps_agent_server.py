@@ -9,7 +9,7 @@
 启动: python ps_agent_server.py [--port 9910]
 
 架构:
-  [任意公网电脑] --HTTP--> [本Server :9910] --FRP/Nginx--> [公网域名/ps-agent/]
+  [任意公网电脑] --HTTP--> [本Server :9910] --FRP--> [阿里云 aiotvr.xyz/ps-agent/]
   [AI/Cascade]   --HTTP--> [本Server :9910] 发送命令 → 队列 → Agent取走执行 → 返回结果
 
 API (Agent端):
@@ -21,8 +21,6 @@ API (Agent端):
 API (AI/管理端):
   GET  /api/agents           列出所有在线Agent
   POST /api/exec             向Agent下发命令
-  POST /api/exec-sync        同步执行 (等待结果返回)
-  POST /api/broadcast        广播命令到所有在线Agent
   GET  /api/agent/<id>/info  获取Agent系统信息
   GET  /api/agent/<id>/output/<cmd_id>  获取命令输出
   GET  /api/agent/<id>/screenshot       请求截图
@@ -43,27 +41,20 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ═══════════════════════════════════════════════════════════
-# 配置 (全部通过环境变量, 道法自然 — 不着相不固定)
+# 配置 (全部支持环境变量覆盖, 道法自然)
 # ═══════════════════════════════════════════════════════════
 
 PORT = int(os.environ.get('PS_AGENT_PORT', '9910'))
-_default_token = os.environ.get('PS_AGENT_MASTER_TOKEN', '')
-if not _default_token:
-    _default_token = secrets.token_urlsafe(32)
-    print(f"[WARN] PS_AGENT_MASTER_TOKEN not set, auto-generated: {_default_token}")
-    print(f"[WARN] Set PS_AGENT_MASTER_TOKEN env var for persistent token across restarts")
-MASTER_TOKEN = _default_token
+MASTER_TOKEN = os.environ.get('PS_AGENT_MASTER_TOKEN', 'dao-ps-agent-2026')
 POLL_TIMEOUT = 30          # 长轮询超时(秒)
 HEARTBEAT_TIMEOUT = 120    # Agent离线判定(秒)
 MAX_OUTPUT_SIZE = 10 * 1024 * 1024  # 10MB max output
 AGENT_EXPIRY = 3600        # Agent 1小时无心跳自动清除
-PUBLIC_BASE_URL = os.environ.get('PS_AGENT_PUBLIC_URL', 'http://localhost:9910')
-PATH_PREFIX = os.environ.get('PS_AGENT_PATH_PREFIX', '').rstrip('/')  # reverse proxy prefix
+PUBLIC_BASE_URL = os.environ.get('PS_AGENT_PUBLIC_URL', 'https://aiotvr.xyz/ps-agent')
+PATH_PREFIX = os.environ.get('PS_AGENT_PATH_PREFIX', '/ps-agent').rstrip('/')  # reverse proxy prefix
 
 # ═══════════════════════════════════════════════════════════
-# Machine Aliases (可自定义, 映射别名 → hostname)
-# 不着相: 此表仅为便利, 不影响核心功能
-# Agent以hostname注册, 别名只是快捷访问
+# 机器别名 (友好名称 → hostname, 方便 dao.ps1 调用)
 # ═══════════════════════════════════════════════════════════
 
 _alias_json = os.environ.get('PS_AGENT_ALIASES', '{}')
@@ -71,6 +62,11 @@ try:
     MACHINE_ALIASES = json.loads(_alias_json)
 except:
     MACHINE_ALIASES = {}
+# 内置默认别名
+MACHINE_ALIASES.setdefault('desktop', 'DESKTOP-MASTER')
+MACHINE_ALIASES.setdefault('laptop', 'zhoumac')
+MACHINE_ALIASES.setdefault('141', 'DESKTOP-MASTER')
+MACHINE_ALIASES.setdefault('179', 'zhoumac')
 
 def resolve_machine_alias(name):
     """Resolve friendly name/alias to stable agent_id (hostname)."""
@@ -128,17 +124,30 @@ agents = {}  # agent_id -> AgentInfo
 agents_lock = threading.Lock()
 
 def get_agent(agent_id):
+    """Case-insensitive agent lookup. 适配一切环境: Windows $env:COMPUTERNAME 常为大写,
+    而别名配置可能小写; 此处统一兜底匹配, 让用户无需关心大小写."""
+    if not agent_id:
+        return None
     with agents_lock:
-        return agents.get(agent_id)
+        # Fast-path: exact match
+        a = agents.get(agent_id)
+        if a:
+            return a
+        # Slow-path: case-insensitive match
+        target = agent_id.lower()
+        for k, v in agents.items():
+            if k.lower() == target:
+                return v
+        return None
 
 def register_agent(sysinfo):
     hostname = sysinfo.get('hostname', 'unknown')
-    agent_id = hostname  # Stable ID: hostname is the key
+    agent_id = hostname  # Stable ID: hostname is the key (reconnect-safe)
     token = secrets.token_urlsafe(32)
     with agents_lock:
         existing = agents.get(agent_id)
         if existing:
-            # Reconnect: update existing agent, preserve history
+            # Reconnect: update existing agent, preserve command history
             existing.token = token
             existing.sysinfo = sysinfo
             existing.connected_at = time.time()
@@ -171,7 +180,7 @@ def queue_command(agent_id, cmd_type, payload):
     cmd_id = f"cmd_{int(time.time()*1000)}_{secrets.token_hex(3)}"
     cmd = {
         'cmd_id': cmd_id,
-        'type': cmd_type,        # shell, screenshot, sysinfo, file_list, file_read, file_write, process_list, process_kill, ...
+        'type': cmd_type,        # shell, screenshot, sysinfo, file_list, file_read, file_write, process_list, process_kill, download, upload
         'payload': payload,
         'queued_at': time.time(),
     }
@@ -216,7 +225,7 @@ class AgentRelayHandler(BaseHTTPRequestHandler):
     server_version = "PsAgentRelay/1.0"
 
     def _normalize_path(self, raw_path):
-        """Strip reverse-proxy path prefix for routing."""
+        """Strip reverse-proxy path prefix (e.g. /ps-agent) for routing."""
         p = raw_path.rstrip('/')
         if PATH_PREFIX and p.startswith(PATH_PREFIX):
             p = p[len(PATH_PREFIX):]
@@ -271,7 +280,7 @@ class AgentRelayHandler(BaseHTTPRequestHandler):
         # Allow localhost without auth — but NOT if proxied (X-Forwarded-For present)
         forwarded = self.headers.get('X-Forwarded-For', '') or self.headers.get('X-Real-IP', '')
         if forwarded:
-            return False  # proxied request — require token
+            return False  # proxied request (FRP/Nginx) — require token
         client_ip = self.client_address[0]
         if client_ip in ('127.0.0.1', '::1', 'localhost'):
             return True
@@ -425,6 +434,7 @@ class AgentRelayHandler(BaseHTTPRequestHandler):
             agent = get_agent(aid)
             if agent and agent.token == tok:
                 agent.last_heartbeat = time.time()
+                # Update sysinfo if provided
                 if body.get('sysinfo'):
                     agent.sysinfo.update(body['sysinfo'])
                 return self._json({'ok': True, 'pending': len(agent.command_queue)})
@@ -541,7 +551,7 @@ def generate_dashboard():
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PS Agent Relay Dashboard</title>
+<title>☰ 公网PowerShell Agent Relay</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:20px}}
@@ -568,27 +578,27 @@ tr:hover{{background:#1a1a2e}}
 </style>
 </head>
 <body>
-<h1>PowerShell Agent Relay</h1>
-<p class="subtitle">One command to rule them all — Any Windows machine, full control</p>
+<h1>☰ 公网 PowerShell Agent Relay</h1>
+<p class="subtitle">道生一 · 一命接万机 — 任意公网电脑，一条命令，全权掌控</p>
 
 <div class="stats">
-    <div class="stat"><div class="num">{online}</div><div class="label">Online Agents</div></div>
-    <div class="stat"><div class="num">{total}</div><div class="label">Total Agents</div></div>
-    <div class="stat"><div class="num">{int(time.time()-_start_time)}s</div><div class="label">Uptime</div></div>
+    <div class="stat"><div class="num">{online}</div><div class="label">在线 Agent</div></div>
+    <div class="stat"><div class="num">{total}</div><div class="label">总计 Agent</div></div>
+    <div class="stat"><div class="num">{int(time.time()-_start_time)}s</div><div class="label">运行时间</div></div>
 </div>
 
 <div class="section">
-<h2>One-liner Bootstrap (run on any Windows PC)</h2>
+<h2>⚡ 一键接入命令 (任意Windows电脑运行)</h2>
 <div class="oneliner">
 irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex
-<button class="copy" onclick="navigator.clipboard.writeText('irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex')">Copy</button>
+<button class="copy" onclick="navigator.clipboard.writeText('irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex')">📋 复制</button>
 </div>
 </div>
 
 <div class="section">
-<h2>Connected Agents ({total})</h2>
+<h2>🖥️ 已连接 Agent ({total})</h2>
 <table>
-<tr><th>Status</th><th>Hostname</th><th>IP</th><th>OS</th><th>User</th><th>Connected</th><th>Heartbeat</th><th>Pending</th><th>Done</th><th>Actions</th></tr>
+<tr><th>状态</th><th>主机名</th><th>IP</th><th>操作系统</th><th>用户</th><th>连接时间</th><th>最后心跳</th><th>待执行</th><th>已完成</th><th>操作</th></tr>
 {agent_rows}
 </table>
 </div>
@@ -600,7 +610,7 @@ const BASE = window.location.pathname.replace(/\\/+$/, '');
 let _token = sessionStorage.getItem('ps_agent_token') || '';
 function getToken() {{
     if (!_token) {{
-        _token = prompt('Enter Master Token:','');
+        _token = prompt('请输入 Master Token:','');
         if (_token) sessionStorage.setItem('ps_agent_token', _token);
     }}
     return _token || '';
@@ -611,7 +621,7 @@ async function api(method, path, body) {{
     const opts = {{method, headers: {{'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json'}}}};
     if (body) opts.body = JSON.stringify(body);
     const r = await fetch(BASE + path, opts);
-    if (r.status === 401) {{ sessionStorage.removeItem('ps_agent_token'); _token = ''; alert('Invalid token'); return {{error:'unauthorized'}}; }}
+    if (r.status === 401) {{ sessionStorage.removeItem('ps_agent_token'); _token = ''; alert('Token无效，请重试'); return {{error:'unauthorized'}}; }}
     return r.json();
 }}
 
@@ -623,27 +633,28 @@ function showOutput(text) {{
 }}
 
 async function execCmd(agentId) {{
-    const cmd = prompt('PowerShell command:', 'Get-ComputerInfo | Select-Object CsName,OsName,OsTotalVisibleMemorySize');
+    const cmd = prompt('输入 PowerShell 命令:', 'Get-ComputerInfo | Select-Object CsName,OsName,OsTotalVisibleMemorySize');
     if (!cmd) return;
-    showOutput('Sending...');
+    showOutput('⏳ 发送命令...');
     const r = await api('POST', '/api/exec', {{agent_id: agentId, cmd: cmd}});
-    if (r.error) {{ showOutput('Error: ' + r.error); return; }}
-    showOutput('Queued: ' + r.cmd_id + '\\nWaiting...');
+    if (r.error) {{ showOutput('❌ ' + r.error); return; }}
+    showOutput('✅ 命令已排队: ' + r.cmd_id + '\\n⏳ 等待执行结果...');
+    // Poll for result
     for (let i = 0; i < 60; i++) {{
         await new Promise(ok => setTimeout(ok, 1000));
         const res = await api('GET', '/api/agent/' + agentId + '/output/' + r.cmd_id);
         if (res.status === 'completed') {{
-            showOutput('Done (exit=' + (res.result.exit_code||0) + ')\\n\\n' + (res.result.stdout || res.result.output || JSON.stringify(res.result)));
+            showOutput('✅ 完成 (exit=' + (res.result.exit_code||0) + ')\\n\\n' + (res.result.stdout || res.result.output || JSON.stringify(res.result)));
             return;
         }}
     }}
-    showOutput('Timeout — command may still be running');
+    showOutput('⏱️ 超时，命令可能仍在执行');
 }}
 
 async function screenshot(agentId) {{
-    showOutput('Requesting screenshot...');
+    showOutput('📷 请求截图...');
     const r = await api('GET', '/api/agent/' + agentId + '/screenshot');
-    if (r.error) {{ showOutput('Error: ' + r.error); return; }}
+    if (r.error) {{ showOutput('❌ ' + r.error); return; }}
     for (let i = 0; i < 30; i++) {{
         await new Promise(ok => setTimeout(ok, 1000));
         const res = await api('GET', '/api/agent/' + agentId + '/output/' + r.cmd_id);
@@ -654,13 +665,13 @@ async function screenshot(agentId) {{
             return;
         }}
     }}
-    showOutput('Screenshot timeout');
+    showOutput('⏱️ 截图超时');
 }}
 
 async function sysinfo(agentId) {{
-    showOutput('Fetching sysinfo...');
+    showOutput('📊 获取系统信息...');
     const r = await api('GET', '/api/agent/' + agentId + '/sysinfo');
-    if (r.error) {{ showOutput('Error: ' + r.error); return; }}
+    if (r.error) {{ showOutput('❌ ' + r.error); return; }}
     for (let i = 0; i < 15; i++) {{
         await new Promise(ok => setTimeout(ok, 1000));
         const res = await api('GET', '/api/agent/' + agentId + '/output/' + r.cmd_id);
@@ -669,9 +680,10 @@ async function sysinfo(agentId) {{
             return;
         }}
     }}
-    showOutput('Timeout');
+    showOutput('⏱️ 超时');
 }}
 
+// Auto-refresh every 10s
 setInterval(() => location.reload(), 15000);
 </script>
 </body></html>"""
@@ -682,69 +694,135 @@ setInterval(() => location.reload(), 15000);
 # ═══════════════════════════════════════════════════════════
 
 def generate_bootstrap_script():
-    """Generate the PowerShell one-liner bootstrap script that agents download and execute."""
+    """Generate the PowerShell one-liner bootstrap script.
+    道法自然: 先连接(快), 后探测(慢). 不让WMI阻塞启动."""
     return f"""# ============================================================
-# PowerShell Agent Bootstrap — One-liner deploy
-# Usage: irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex
+# 公网 PowerShell Agent v2.0 — 一键接入脚本
+# 用法: irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex
+# 道法自然: 先连接, 后探测 — 零等待启动
 # ============================================================
 $ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $SERVER = '{PUBLIC_BASE_URL}'
 $POLL_URL = $SERVER + '/api/poll'
 $CONNECT_URL = $SERVER + '/api/connect'
 $RESULT_URL = $SERVER + '/api/result'
 $HEARTBEAT_URL = $SERVER + '/api/heartbeat'
 
-function Get-SysInfo {{
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-    $net = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-           Where-Object {{ $_.IPAddress -notmatch '^(127\\.|169\\.254)' }} |
-           Select-Object -First 1
-    $pub_ip = 'unknown'; try {{ $pub_ip = (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 5) }} catch {{ }}
-    $uptime_h = -1; try {{ $uptime_h = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1) }} catch {{ }}
+# ── 代理旁路 (适配一切环境: 清理本会话陈旧/失效代理, relay 永远公网直达) ──
+foreach ($pv in 'HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROXY','all_proxy') {{
+    Set-Item "env:$pv" -Value '' -EA SilentlyContinue
+}}
+try {{ $_host = ([Uri]$SERVER).Host }} catch {{ $_host = '' }}
+$env:NO_PROXY = if ($_host) {{ "localhost,127.0.0.1,$_host" }} else {{ 'localhost,127.0.0.1' }}
+# .NET HttpClient 需要显式 UseDefaultProxy=false; 通过 handler 覆盖, 双保险
+[System.Net.WebRequest]::DefaultWebProxy = [System.Net.WebProxy]::new()
+
+# ── 快速系统信息 (零WMI, <100ms) ──
+function Get-QuickSysInfo {{
     @{{
-        hostname    = $env:COMPUTERNAME
-        username    = $env:USERNAME
-        local_ip    = $net.IPAddress
-        public_ip   = $pub_ip
-        os_version  = "$($os.Caption) $($os.Version)"
-        cpu_name    = $cpu.Name
-        cpu_cores   = $cpu.NumberOfCores
-        ram_total_gb = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
-        ram_free_gb  = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
-        disk_info   = (Get-PSDrive -PSProvider FileSystem | ForEach-Object {{
-            "$($_.Name): $([math]::Round($_.Used/1GB,1))/$([math]::Round(($_.Used+$_.Free)/1GB,1))GB"
-        }}) -join ' | '
-        ps_version  = $PSVersionTable.PSVersion.ToString()
-        uptime_hours = $uptime_h
-        agent_version = '1.0'
+        hostname      = $env:COMPUTERNAME
+        username      = $env:USERNAME
+        domain        = $env:USERDOMAIN
+        os_arch       = $env:PROCESSOR_ARCHITECTURE
+        ps_version    = $PSVersionTable.PSVersion.ToString()
+        agent_version = '2.0'
+        agent_pid     = $PID
+        public_ip     = 'detecting...'
+        os_version    = 'detecting...'
     }}
 }}
 
-Write-Host "`n[*] PowerShell Agent v1.0 starting..." -ForegroundColor Cyan
-Write-Host "[*] Collecting system info..." -ForegroundColor Gray
-$sysinfo = Get-SysInfo
-Write-Host "[*] Host: $($sysinfo.hostname) | IP: $($sysinfo.public_ip) | OS: $($sysinfo.os_version)" -ForegroundColor Gray
+# ── 详细系统信息 (带超时保护, 后台收集) ──
+function Get-FullSysInfo {{
+    $info = @{{
+        hostname      = $env:COMPUTERNAME
+        username      = $env:USERNAME
+        domain        = $env:USERDOMAIN
+        os_arch       = $env:PROCESSOR_ARCHITECTURE
+        ps_version    = $PSVersionTable.PSVersion.ToString()
+        agent_version = '2.0'
+        agent_pid     = $PID
+    }}
+    # WMI calls with individual try/catch (never block)
+    try {{ $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 10 -EA Stop
+        $info['os_version']  = "$($os.Caption) $($os.Version)"
+        $info['ram_total_gb'] = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+        $info['ram_free_gb']  = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+        try {{ $info['uptime_hours'] = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1) }} catch {{}}
+    }} catch {{ $info['os_version'] = 'WMI timeout' }}
+    try {{ $cpu = Get-CimInstance Win32_Processor -OperationTimeoutSec 10 -EA Stop | Select-Object -First 1
+        $info['cpu_name']    = $cpu.Name
+        $info['cpu_cores']   = $cpu.NumberOfCores
+        $info['cpu_threads'] = $cpu.NumberOfLogicalProcessors
+    }} catch {{}}
+    try {{ $net = Get-NetIPAddress -AddressFamily IPv4 -EA Stop |
+           Where-Object {{ $_.IPAddress -notmatch '^(127\\.|169\\.254)' }} | Select-Object -First 1
+        $info['local_ip'] = $net.IPAddress
+    }} catch {{}}
+    try {{ $info['public_ip'] = (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 5) }} catch {{ $info['public_ip'] = 'unknown' }}
+    try {{ $info['disk_info'] = (Get-PSDrive -PSProvider FileSystem -EA Stop | ForEach-Object {{
+        "$($_.Name): $([math]::Round($_.Used/1GB,1))/$([math]::Round(($_.Used+$_.Free)/1GB,1))GB"
+    }}) -join ' | ' }} catch {{}}
+    return $info
+}}
 
-Write-Host "[*] Connecting to: $SERVER" -ForegroundColor Yellow
+# ── 安全JSON发送 ──
+function Send-JsonSafe {{
+    param([string]$Url, [hashtable]$Body, [int]$TimeoutSec = 30)
+    $json = $Body | ConvertTo-Json -Depth 10 -Compress
+    if ($json.Length -gt 8MB) {{
+        if ($Body.result -and $Body.result.stdout) {{
+            $Body.result.stdout = $Body.result.stdout.Substring(0, [Math]::Min($Body.result.stdout.Length, 500000)) + "`n... [TRUNCATED]"
+        }}
+        if ($Body.result -and $Body.result.screenshot_base64 -and $Body.result.screenshot_base64.Length -gt 6MB) {{
+            $Body.result.Remove('screenshot_base64')
+            $Body.result['error'] = 'Screenshot too large'
+        }}
+        $json = $Body | ConvertTo-Json -Depth 10 -Compress
+    }}
+    Invoke-RestMethod -Uri $Url -Method POST -Body $json -ContentType 'application/json; charset=utf-8' -TimeoutSec $TimeoutSec
+}}
+
+# ══════════════════════════════════════════════════
+# 启动 · 道生一(快连) → 一生二(后探) → 二生三(听令)
+# ══════════════════════════════════════════════════
+
+Write-Host "`n[*] 公网PowerShell Agent v2.0 启动中..." -ForegroundColor Cyan
+Write-Host "[*] 主机: $env:COMPUTERNAME | 用户: $env:USERNAME" -ForegroundColor Gray
+
+# Step 1: 快速连接 (仅hostname, <1秒)
+Write-Host "[*] 连接服务器: $SERVER" -ForegroundColor Yellow
+$quickInfo = Get-QuickSysInfo
 try {{
-    $regBody = @{{ sysinfo = $sysinfo }} | ConvertTo-Json -Depth 5
+    $regBody = @{{ sysinfo = $quickInfo }} | ConvertTo-Json -Depth 5
     $reg = Invoke-RestMethod -Uri $CONNECT_URL -Method POST -Body $regBody -ContentType 'application/json; charset=utf-8' -TimeoutSec 15
 }} catch {{
-    Write-Host "[!] Connection failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[!] 连接失败: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[!] 服务器: $SERVER" -ForegroundColor Red
     return
 }}
 
 $AGENT_ID = $reg.agent_id
 $TOKEN = $reg.token
-Write-Host "[+] Registered! Agent ID: $AGENT_ID" -ForegroundColor Green
-Write-Host "[+] Waiting for commands... (Ctrl+C to exit)`n" -ForegroundColor Green
+Write-Host "[+] 注册成功! Agent ID: $AGENT_ID" -ForegroundColor Green
 
+# Step 2: 后台收集详细信息并通过心跳更新
+Write-Host "[*] 后台收集详细系统信息..." -ForegroundColor Gray
+$fullInfo = Get-FullSysInfo
+try {{
+    $hb = @{{ agent_id = $AGENT_ID; token = $TOKEN; sysinfo = $fullInfo }} | ConvertTo-Json -Depth 5
+    Invoke-RestMethod -Uri $HEARTBEAT_URL -Method POST -Body $hb -ContentType 'application/json' -TimeoutSec 10 | Out-Null
+    Write-Host "[*] IP: $($fullInfo.public_ip) | OS: $($fullInfo.os_version)" -ForegroundColor Gray
+}} catch {{}}
+
+Write-Host "[+] 等待命令中... (Ctrl+C 退出)`n" -ForegroundColor Green
+
+# ── 命令执行器 (全功能) ──
 function Invoke-AgentCommand($cmd) {{
     $type = $cmd.type
     $payload = $cmd.payload
     $result = @{{}}
-
     switch ($type) {{
         'shell' {{
             $command = $payload.command
@@ -776,92 +854,198 @@ function Invoke-AgentCommand($cmd) {{
             try {{
                 Add-Type -AssemblyName System.Windows.Forms
                 Add-Type -AssemblyName System.Drawing
+                $scale = if ($payload.scale) {{ [int]$payload.scale }} else {{ 50 }}
                 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
                 $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
                 $g = [System.Drawing.Graphics]::FromImage($bmp)
                 $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+                $newW = [int]($bounds.Width * $scale / 100)
+                $newH = [int]($bounds.Height * $scale / 100)
+                $scaled = New-Object System.Drawing.Bitmap($newW, $newH)
+                $g2 = [System.Drawing.Graphics]::FromImage($scaled)
+                $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g2.DrawImage($bmp, 0, 0, $newW, $newH)
                 $ms = New-Object System.IO.MemoryStream
-                $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+                $jpegCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object {{ $_.MimeType -eq 'image/jpeg' }}
+                $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+                $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 60L)
+                $scaled.Save($ms, $jpegCodec, $encoderParams)
                 $b64 = [Convert]::ToBase64String($ms.ToArray())
-                $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
-                $result = @{{ screenshot_base64 = $b64; width = $bounds.Width; height = $bounds.Height }}
+                $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $scaled.Dispose(); $ms.Dispose()
+                $result = @{{ screenshot_base64 = $b64; width = $newW; height = $newH; scale = $scale; format = 'jpeg'; size_kb = [math]::Round($b64.Length/1024,1) }}
             }} catch {{
                 $result = @{{ error = $_.Exception.Message }}
             }}
         }}
         'sysinfo' {{
             Write-Host "  [>] sysinfo" -ForegroundColor DarkCyan
-            $result = Get-SysInfo
+            $result = Get-FullSysInfo
             $result['processes_count'] = (Get-Process).Count
-            $result['top_cpu'] = Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 |
-                ForEach-Object {{ "$($_.ProcessName): $([math]::Round($_.CPU,1))s" }}
+            $result['top_cpu'] = @(Get-Process | Sort-Object CPU -Descending | Select-Object -First 10 |
+                ForEach-Object {{ @{{ name=$_.ProcessName; pid=$_.Id; cpu_sec=[math]::Round($_.CPU,1); mem_mb=[math]::Round($_.WorkingSet64/1MB,1) }} }})
+            $result['network_adapters'] = @(Get-NetAdapter -EA SilentlyContinue | Where-Object Status -eq 'Up' |
+                ForEach-Object {{ @{{ name=$_.Name; speed=$_.LinkSpeed; mac=$_.MacAddress }} }})
+            $result['listening_ports'] = @(Get-NetTCPConnection -State Listen -EA SilentlyContinue | Sort-Object LocalPort | Select-Object -First 50 |
+                ForEach-Object {{ @{{ port=$_.LocalPort; pid=$_.OwningProcess; process=(Get-Process -Id $_.OwningProcess -EA SilentlyContinue).ProcessName }} }})
         }}
-        default {{
-            $result = @{{ error = "Unknown command type: $type" }}
+        'process_list' {{
+            Write-Host "  [>] process_list" -ForegroundColor DarkCyan
+            $result = @{{ processes = @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 100 |
+                ForEach-Object {{ @{{ name=$_.ProcessName; pid=$_.Id; mem_mb=[math]::Round($_.WorkingSet64/1MB,1); cpu_sec=[math]::Round($_.CPU,1); window=$_.MainWindowTitle; path=$_.Path }} }}) }}
         }}
+        'process_kill' {{
+            $pid_to_kill = $payload.pid; $name_to_kill = $payload.name
+            Write-Host "  [>] process_kill: pid=$pid_to_kill name=$name_to_kill" -ForegroundColor DarkYellow
+            try {{
+                if ($pid_to_kill) {{ Stop-Process -Id $pid_to_kill -Force; $result = @{{ killed_pid = $pid_to_kill; ok = $true }} }}
+                elseif ($name_to_kill) {{ Stop-Process -Name $name_to_kill -Force; $result = @{{ killed_name = $name_to_kill; ok = $true }} }}
+                else {{ $result = @{{ error = 'pid or name required' }} }}
+            }} catch {{ $result = @{{ error = $_.Exception.Message }} }}
+        }}
+        'file_list' {{
+            $dir = if ($payload.path) {{ $payload.path }} else {{ 'C:\\' }}
+            Write-Host "  [>] file_list: $dir" -ForegroundColor DarkCyan
+            try {{
+                $items = @(Get-ChildItem -Path $dir -EA Stop | Select-Object -First 500 |
+                    ForEach-Object {{ @{{ name=$_.Name; size=$_.Length; is_dir=$_.PSIsContainer; modified=$_.LastWriteTime.ToString('s'); ext=$_.Extension }} }})
+                $result = @{{ path = $dir; items = $items; count = $items.Count }}
+            }} catch {{ $result = @{{ error = $_.Exception.Message }} }}
+        }}
+        'file_read' {{
+            $path = $payload.path
+            Write-Host "  [>] file_read: $path" -ForegroundColor DarkCyan
+            try {{
+                $fi = Get-Item $path -EA Stop
+                if ($fi.Length -gt 5MB) {{ $result = @{{ error = "File too large: $([math]::Round($fi.Length/1MB,1))MB (max 5MB)"; size = $fi.Length }} }}
+                else {{ $result = @{{ path = $path; size = $fi.Length; content_base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) }} }}
+            }} catch {{ $result = @{{ error = $_.Exception.Message }} }}
+        }}
+        'file_write' {{
+            $path = $payload.path
+            Write-Host "  [>] file_write: $path" -ForegroundColor DarkYellow
+            try {{
+                $dir = Split-Path $path -Parent
+                if (-not (Test-Path $dir)) {{ New-Item -Path $dir -ItemType Directory -Force | Out-Null }}
+                $bytes = [Convert]::FromBase64String($payload.content_base64)
+                [IO.File]::WriteAllBytes($path, $bytes)
+                $result = @{{ path = $path; written_bytes = $bytes.Length; ok = $true }}
+            }} catch {{ $result = @{{ error = $_.Exception.Message }} }}
+        }}
+        'registry_read' {{
+            $key = $payload.path
+            Write-Host "  [>] registry_read: $key" -ForegroundColor DarkCyan
+            try {{
+                $item = Get-ItemProperty -Path $key -EA Stop
+                $props = @{{}}; $item.PSObject.Properties | Where-Object {{ $_.Name -notmatch '^PS' }} | ForEach-Object {{ $props[$_.Name] = "$($_.Value)" }}
+                $result = @{{ path = $key; properties = $props }}
+            }} catch {{ $result = @{{ error = $_.Exception.Message }} }}
+        }}
+        'service_list' {{
+            Write-Host "  [>] service_list" -ForegroundColor DarkCyan
+            $filter = $payload.filter; $svcs = Get-Service
+            if ($filter) {{ $svcs = $svcs | Where-Object {{ $_.Name -like "*$filter*" -or $_.DisplayName -like "*$filter*" }} }}
+            $result = @{{ services = @($svcs | Select-Object -First 200 | ForEach-Object {{ @{{ name=$_.Name; display=$_.DisplayName; status=$_.Status.ToString(); start_type=$_.StartType.ToString() }} }}) }}
+        }}
+        'network_info' {{
+            Write-Host "  [>] network_info" -ForegroundColor DarkCyan
+            $result = @{{
+                adapters = @(Get-NetAdapter -EA SilentlyContinue | ForEach-Object {{ @{{ name=$_.Name; status=$_.Status.ToString(); speed=$_.LinkSpeed; mac=$_.MacAddress }} }})
+                ip_config = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | ForEach-Object {{ @{{ ip=$_.IPAddress; prefix=$_.PrefixLength; iface=$_.InterfaceAlias }} }})
+                dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -EA SilentlyContinue | ForEach-Object {{ @{{ iface=$_.InterfaceAlias; dns=$_.ServerAddresses }} }})
+                connections_count = (Get-NetTCPConnection -State Established -EA SilentlyContinue | Measure-Object).Count
+            }}
+        }}
+        'env_vars' {{
+            Write-Host "  [>] env_vars" -ForegroundColor DarkCyan
+            $filter = $payload.filter; $all = [Environment]::GetEnvironmentVariables(); $vars = @{{}}
+            $all.GetEnumerator() | ForEach-Object {{ if (-not $filter -or $_.Key -like "*$filter*") {{ $vars[$_.Key] = $_.Value }} }}
+            $result = @{{ variables = $vars; count = $vars.Count }}
+        }}
+        'installed_apps' {{
+            Write-Host "  [>] installed_apps" -ForegroundColor DarkCyan
+            $result = @{{ apps = @(Get-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*","HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*" -EA SilentlyContinue |
+                Where-Object {{ $_.DisplayName }} | Sort-Object DisplayName | ForEach-Object {{ @{{ name=$_.DisplayName; version=$_.DisplayVersion; publisher=$_.Publisher }} }}) }}
+        }}
+        default {{ $result = @{{ error = "Unknown command type: $type"; supported = @('shell','screenshot','sysinfo','process_list','process_kill','file_list','file_read','file_write','registry_read','service_list','network_info','env_vars','installed_apps') }} }}
     }}
     return $result
 }}
 
+# ── 自动重注册 ──
 function Invoke-BootstrapReRegister {{
-    Write-Host "[*] Token expired, re-registering..." -ForegroundColor Yellow
+    Write-Host "[*] Token失效，重新注册..." -ForegroundColor Yellow
     try {{
-        $si = Get-SysInfo
+        $si = Get-FullSysInfo
         $body = @{{ sysinfo = $si }} | ConvertTo-Json -Depth 5
         $reg = Invoke-RestMethod -Uri $CONNECT_URL -Method POST -Body $body -ContentType 'application/json; charset=utf-8' -TimeoutSec 15
-        $script:AGENT_ID = $reg.agent_id
-        $script:TOKEN = $reg.token
-        Write-Host "[+] Re-registered! Agent ID: $($script:AGENT_ID)" -ForegroundColor Green
+        $script:AGENT_ID = $reg.agent_id; $script:TOKEN = $reg.token
+        Write-Host "[+] 重新注册成功! Agent ID: $($script:AGENT_ID)" -ForegroundColor Green
         return $true
     }} catch {{
-        Write-Host "[!] Re-register failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] 重新注册失败: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }}
 }}
 
-$reconnect_count = 0
+# ── 心跳后台定时器 ──
+$heartbeatTimer = New-Object System.Timers.Timer
+$heartbeatTimer.Interval = 30000
+$heartbeatTimer.AutoReset = $true
+$heartbeatAction = {{
+    try {{
+        $body = @{{ agent_id = $script:AGENT_ID; token = $script:TOKEN }} | ConvertTo-Json
+        Invoke-RestMethod -Uri $script:HEARTBEAT_URL -Method POST -Body $body -ContentType 'application/json' -TimeoutSec 10 | Out-Null
+    }} catch {{ }}
+}}
+Register-ObjectEvent -InputObject $heartbeatTimer -EventName Elapsed -Action $heartbeatAction | Out-Null
+$heartbeatTimer.Start()
+
+# ── 主循环: 长轮询 ──
+$reconnect_count = 0; $total_commands = 0
 try {{
     while ($true) {{
         try {{
-            $poll = Invoke-RestMethod -Uri "$POLL_URL`?id=$AGENT_ID&token=$TOKEN&timeout=30" -TimeoutSec 35
+            $pollUri = $POLL_URL + '?id=' + $AGENT_ID + '&token=' + $TOKEN + '&timeout=30'
+            $poll = Invoke-RestMethod -Uri $pollUri -TimeoutSec 35
             $reconnect_count = 0
-
             if ($poll.commands -and $poll.commands.Count -gt 0) {{
                 foreach ($cmd in $poll.commands) {{
-                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Command: $($cmd.type) ($($cmd.cmd_id))" -ForegroundColor Cyan
+                    $total_commands++
+                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] #$total_commands 收到命令: $($cmd.type) ($($cmd.cmd_id))" -ForegroundColor Cyan
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
                     $result = Invoke-AgentCommand $cmd
-                    $body = @{{
-                        agent_id = $AGENT_ID
-                        token    = $TOKEN
-                        cmd_id   = $cmd.cmd_id
-                        result   = $result
-                    }} | ConvertTo-Json -Depth 10 -Compress
+                    $sw.Stop()
+                    $result['execution_time_ms'] = $sw.ElapsedMilliseconds
                     try {{
-                        if ($body.Length -gt 10MB) {{
-                            $body = (@{{
-                                agent_id = $AGENT_ID; token = $TOKEN; cmd_id = $cmd.cmd_id
-                                result = @{{ error = "Output too large: $([math]::Round($body.Length/1MB,1))MB" }}
-                            }} | ConvertTo-Json -Compress)
-                        }}
-                        Invoke-RestMethod -Uri $RESULT_URL -Method POST -Body $body -ContentType 'application/json' -TimeoutSec 30 | Out-Null
-                        Write-Host "  [+] Result submitted" -ForegroundColor Green
+                        Send-JsonSafe -Url $RESULT_URL -Body @{{ agent_id=$AGENT_ID; token=$TOKEN; cmd_id=$cmd.cmd_id; result=$result }} -TimeoutSec 30
+                        Write-Host "  [+] 结果已提交 ($($sw.ElapsedMilliseconds)ms)" -ForegroundColor Green
                     }} catch {{
-                        Write-Host "  [!] Submit failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "  [!] 提交失败: $($_.Exception.Message)" -ForegroundColor Red
                     }}
                 }}
             }}
+        }} catch [System.Net.WebException] {{
+            if ($_.Exception.Status -eq 'Timeout') {{ continue }}
+            $resp = $_.Exception.Response
+            if ($resp -and [int]$resp.StatusCode -eq 401) {{
+                if (Invoke-BootstrapReRegister) {{ $reconnect_count = 0; continue }}
+            }}
+            $reconnect_count++; $wait = [Math]::Min($reconnect_count * 5, 60)
+            Write-Host "[!] 连接断开 ($($_.Exception.Message))，${{wait}}秒后重连 (#$reconnect_count)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $wait
         }} catch {{
             if ($_.Exception.Message -match '401|Unauthorized') {{
                 if (Invoke-BootstrapReRegister) {{ $reconnect_count = 0; continue }}
             }}
-            $reconnect_count++
-            $wait = [Math]::Min($reconnect_count * 5, 60)
-            Write-Host "[!] Disconnected, retrying in $($wait)s (#$reconnect_count)..." -ForegroundColor Yellow
+            $reconnect_count++; $wait = [Math]::Min($reconnect_count * 5, 60)
+            Write-Host "[!] 错误: $($_.Exception.Message)，${{wait}}秒后重连 (#$reconnect_count)..." -ForegroundColor Yellow
             Start-Sleep -Seconds $wait
         }}
     }}
 }} finally {{
-    Write-Host "`n[*] Agent stopped" -ForegroundColor Yellow
+    $heartbeatTimer.Stop(); $heartbeatTimer.Dispose()
+    Get-EventSubscriber | Unregister-Event -EA SilentlyContinue
+    Write-Host "`n[*] Agent 已退出 (共执行 $total_commands 条命令)" -ForegroundColor Yellow
 }}
 """
 
@@ -886,8 +1070,8 @@ _start_time = time.time()
 def main():
     global PORT
     import argparse
-    parser = argparse.ArgumentParser(description='PowerShell Agent Relay Server')
-    parser.add_argument('--port', type=int, default=PORT, help=f'Port (default {PORT})')
+    parser = argparse.ArgumentParser(description='公网 PowerShell Agent Relay Server')
+    parser.add_argument('--port', type=int, default=PORT, help=f'端口 (默认 {PORT})')
     args = parser.parse_args()
     PORT = args.port
 
@@ -900,19 +1084,20 @@ def main():
     server = ThreadingHTTPServer(('0.0.0.0', PORT), AgentRelayHandler)
     hostname = socket.gethostname()
     print(f"""
-========================================
-  PowerShell Agent Relay v1.0
-========================================
-  Dashboard:   http://localhost:{PORT}/
-  Health:      http://localhost:{PORT}/api/health
-  Bootstrap:   http://localhost:{PORT}/bootstrap.ps1
-  Public URL:  {PUBLIC_BASE_URL}/
-  Host:        {hostname}
-  Token:       {MASTER_TOKEN[:8]}...
-========================================
-  One-liner:
-  irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex
-========================================
+╔══════════════════════════════════════════════════════════╗
+║  ☰ 公网 PowerShell Agent Relay v1.0                     ║
+║  道生一 · 一命接万机                                      ║
+╠══════════════════════════════════════════════════════════╣
+║  Dashboard:  http://localhost:{PORT}/                     ║
+║  Health:     http://localhost:{PORT}/api/health            ║
+║  Bootstrap:  http://localhost:{PORT}/bootstrap.ps1         ║
+║  公网:       {PUBLIC_BASE_URL}/                            ║
+║  主机:       {hostname}                                    ║
+║  Master Token: {MASTER_TOKEN[:8]}...                       ║
+╠══════════════════════════════════════════════════════════╣
+║  一键接入:                                                ║
+║  irm {PUBLIC_BASE_URL}/bootstrap.ps1 | iex               ║
+╚══════════════════════════════════════════════════════════╝
 """)
     try:
         server.serve_forever()

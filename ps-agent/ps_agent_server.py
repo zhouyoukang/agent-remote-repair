@@ -33,6 +33,19 @@ API (AI/管理端):
 
 import json, os, sys, time, socket, uuid, hashlib, base64, io
 import threading, secrets
+
+# 道法自然: Windows 默认 GBK 控制台会使 banner 里的 ☰ 等字符炸, 导致 relay 反复崩溃重启
+# 根因修复: 统一强制 stdout/stderr 为 UTF-8 (errors=replace 兜底), 与 dao 语义一致
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+        except Exception:
+            pass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs, unquote

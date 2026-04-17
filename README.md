@@ -57,18 +57,23 @@ npm install && npm start
 ## 自动能力
 
 - **零成本公网隧道**: cloudflared(自动下载) → ngrok → SSH(localhost.run)，零配置零费用
-- **道核驱动**: 动态端口/Token/指纹，无硬编码
-- **6 种投屏源自动发现**: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏
-- **5 级输入路由自适应**: ghost → InputRoutes → adb_hub → dao-remote → scrcpy → ADB兜底
+- **道核驱动 · 唯变所适**: 无硬编码端口/Token/URL
+  - `_publicUrl` fallback 自 `os.networkInterfaces()` 首个 LAN IP 涌出, 无 "localhost" 字面裸露
+  - `ADB_HUB_TOKEN` 四级涌现 (env > 缓存文件 > Ed25519 签名派生 > 遗留字面量), 每设备唯一, 零共享秘密
+  - 外部服务 (scrcpy/mjpeg/adb_hub) 声明 `portCandidates: [base, +1, +2]`, 注册表探测即锁定实际存活端口
+- **一表定万法 · 6 种流式投屏源**: ghost_shell / scrcpy / dao-remote / MJPEG / adb_hub / Agent截屏 — 优先级/探测/代理/路由皆源于 `dao_screen_registry` 单表
+- **柔弱胜刚强 · 失败即退让**: 任一 capture/input 失败, 源立刻 `markOffline`, 下次调用秒跳下源；不等 30s 周期重探
+- **6 级输入路由自适应**: ghost → InputRoutes → MJPEG → dao-remote → adb_hub → scrcpy → ADB兜底
+- **远程工具自动检测**: 向日葵 / 无界趣连 / ToDesk / AnyDesk / RustDesk / TeamViewer / Parsec — 通过 `/tools/launch` 一键启动已安装工具（向日葵等 P2P 客户端无本地流式 API，分类为启动器）
 - **浏览器实时投屏** + 触控/键盘/文本反向控制
 
 ## 设计哲学
 
 - **道法自然** — 零配置，一切自动发现、自动适配
-- **万法归宗** — 统一入口 `captureScreenBest` / `sendInputToDevice`，6 种投屏源、5 级输入源透明切换
-- **反者道之动** — 优先级自适应: ghost(30fps最强) → scrcpy(安卓最强) → dao(亲情远程) → adb_hub(ADB全控) → Agent截屏(最通用)
+- **万法归宗 · 一表定万法** — `dao_screen_registry` 一处定义，`discover`/`best`/`capture`/`input`/`proxy` 皆为纯委派；新增/删除/调整优先级只动一行
+- **反者道之动** — 优先级由 registry 的 `priority` 字段决定: ghost(10) → scrcpy(20) → dao(30) → input(40) → mjpeg(50) → adb_hub(60)
 - **柔弱胜刚强** — 服务可随时上下线，30s 自动重探，无感切换
-- **去芜留菁** — 所有投屏/输入路径收敛为两个核心函数，无重复逻辑
+- **去芜留菁** — `captureScreenBest`/`sendInputToDevice` 皆为三行代理；分支逻辑不再散落各处
 
 ## 架构
 
@@ -88,6 +93,7 @@ npm install && npm start
                               ──► dao-remote :9900 (Go版亲情远程)
                               ──► MJPEG :8081 / Input :8084
                               ──► adb_hub :9861 (ADB全控中枢)
+                              ──► 向日葵 :13333 (本地API探测)
 ```
 
 ### 四层融合
@@ -95,9 +101,10 @@ npm install && npm start
 | 层 | 组件 | 作用 |
 |----|------|------|
 | **道** | `dao_kernel.js` + `dao.js` | 道核(熵源/身份/发现/能力/会话) + 入口 |
-| **屏** | `/screen/*` + `/ws/screen` | 6 源投屏: ghost/scrcpy/dao/mjpeg/adb_hub/agent，自适应 |
-| **手** | `/input/*` + 触控/键盘 | 5 级输入: ghost/InputRoutes/adb_hub/dao/scrcpy + ADB兜底 |
+| **屏** | `/screen/*` + `/ws/screen` | 6 流源 + Agent兜底: ghost/scrcpy/dao/input/mjpeg/adb_hub，自适应 |
+| **手** | `/input/*` + 触控/键盘 | 6 级输入: ghost/InputRoutes/mjpeg/adb_hub/dao/scrcpy + ADB兜底 |
 | **脑** | `/brain/*` + 诊断引擎 | 诊断修复: 网络/hosts/防火墙/缓存 |
+| **器** | `/tools/*` + 注册表 | P2P 启动器: 向日葵/无界趣连/ToDesk/AnyDesk/RustDesk/TeamViewer/Parsec |
 
 ## 投屏与控制
 
@@ -112,27 +119,31 @@ npm install && npm start
 - **文本输入**: 弹窗输入 → 发送到远程
 - **Windows 控制栏**: ghost/dao 在线时自动显示桌面快捷操作
 
-### 投屏源自动发现 (6 源优先级)
+### 投屏源自动发现 (6 流源 + Agent 兜底)
 
-| 优先级 | 源 | 端口 | 能力 | 适用 |
+priority 数字定义于 `dao_screen_registry`，越小越优。`capture` 为函数才入选流路径。
+
+| priority | 源 | 端口 | 能力 | 适用 |
 |--------|-----|------|------|------|
-| ★★★★ | ghost_shell | 8000 | 30fps WS流/截图/桌面控制 | Windows |
-| ★★★☆ | scrcpy Hub | 8890 | 截图/录制/控制/多设备 | Android |
-| ★★★☆ | dao-remote | 9900 | 截图/桌面控制 (Go版) | Windows |
-| ★★☆☆ | MJPEG | 8081 | 实时MJPEG流 | Android |
-| ★★☆☆ | adb_hub | 9861 | ADB截图/shell/多设备 | Android |
-| ★☆☆☆ | Agent screencap | — | PowerShell桌面截图 | Windows |
+| 10 | ghost_shell | 8000 | 30fps WS流/截图/桌面控制 | Windows |
+| 20 | scrcpy Hub | 8890 | 截图/录制/控制/多设备 | Android |
+| 30 | dao-remote | 9900 | 截图/桌面控制 (Go版) | Windows |
+| 50 | MJPEG | 8081 | 实时MJPEG流 + 同端口输入 | Android |
+| 60 | adb_hub | 9861 | ADB截图/shell/多设备 | Android |
+| 兜底 | Agent screencap | — | PowerShell桌面截图 | Windows |
+| 99 | 向日葵 | 13333 (bridge) | P2P 启动器（`capture=null`）— 通过 `/tools/launch` 调用 | Windows |
 
 ### 输入路由优先级
 
-| 优先级 | 源 | 说明 |
+| priority | 源 | 说明 |
 |--------|-----|------|
-| 1 | ghost_shell | Windows 桌面 30fps 控制 (鼠标/键盘/滚轮) |
-| 2 | InputRoutes | Android 120+ API 端点 |
-| 3 | adb_hub | ADB 全控中枢 (tap/swipe/key/text/shell) |
-| 4 | dao-remote | 亲情远程 Go 版 |
-| 5 | scrcpy Hub | scrcpy API |
-| 兜底 | ADB fallback | 原始 `adb shell input` 命令 |
+| 10 | ghost_shell | Windows 桌面 30fps 控制 (鼠标/键盘/滚轮) |
+| 40 | InputRoutes | Android 120+ API 端点 (input-only, 无 capture) |
+| 50 | MJPEG | 同端口输入 |
+| 60 | adb_hub | ADB 全控中枢 (tap/swipe/key/text/shell) |
+| 30 | dao-remote | 亲情远程 Go 版 |
+| 20 | scrcpy Hub | scrcpy API |
+| 兜底 | ADB fallback | 原始 `adb shell input` 命令 (在 `sendInputToDevice` reject 后兜底) |
 
 ## 端点一览
 
@@ -142,36 +153,63 @@ npm install && npm start
 | `/go` | 统一 Agent 脚本（自动 ws/wss，多路径） |
 | `/api/health` | Hub 健康探针 |
 | `/screen/sources` | 投屏源状态 + 最优源 |
-| `/screen/capture` | 截屏 (mode=auto/ghost/scrcpy/dao/adb_hub/agent) |
+| `/screen/capture` | 截屏 (mode=auto/ghost/scrcpy/dao/sunlogin/adb_hub/agent) |
 | `/screen/stream` | 实时流代理 |
 | `/screen/scrcpy/*` | scrcpy Hub API 代理 |
 | `/screen/ghost/*` | ghost_shell API 代理 |
 | `/screen/dao/*` | dao-remote API 代理 |
 | `/screen/adb/*` | adb_hub API 代理 |
+| `/screen/sunlogin/*` | 向日葵本地API代理 |
+| `/tools` | 远程工具注册表 (自动检测向日葵/无界趣连/ToDesk/AnyDesk等) |
+| `/tools/launch` | 一键启动指定工具 (POST {id}) |
+| `/tools/auto` | 自动启动最优可用工具 |
 | `/input/{action}` | 反向控制 (tap/swipe/key/text/home/back/scroll/...) |
 | `/ws/screen` | WebSocket 实时投屏 + 输入通道 |
 | `/ws/sense` | WebSocket 诊断控制台 |
 | `/ws/agent` | WebSocket Agent 连接 |
 | `/status` | 系统状态 JSON |
+| `/dao/discover` | **身份+LAN IP+端口+NAT 状态**（无需 token，客户端自发现的唯一入口） |
+| `/pair?format=html\|svg\|png\|ascii\|json` | **一码配对**：QR 二维码；QR 中 URL 为 `http(s)://<host>/c#<pairId>.<fp>` |
+| `/pair/claim` | **POST `{pairId}`** → 一次性返回 Ed25519 长 token |
+| `/c` | **PWA 落地页**：手机扫 QR 自动打开此页 → 自动 claim → TOFU 缓存 → 跳 `/sense` |
+| `/manifest.webmanifest`, `/icon.svg` | PWA 可安装 |
 | `/relay/*` | PS Agent Relay 代理 |
 | `/brain/exec` | 远程执行命令 |
 | `/brain/auto` | 自动诊断 |
 | `/marble` | 3D 世界 Gaussian Splatting Viewer (需 `WLT_API_KEY`) |
 
-## 环境变量（全部可选）
+## 无为而治 · 五感涌现 (v8.1+)
 
-| 变量 | 默认值 | 说明 |
+**零配置零字面量** — 所有端口/令牌/URL 从 Ed25519 身份或运行时探测涌现：
+
+- **ADB_HUB_TOKEN** 从 `identity.serviceToken("adb_hub")` 确定性派生，跨重启稳定，跨进程等价
+- **LAN 多播信标**（`dao_rendezvous.js`）周期广播 hub 身份 + LAN IP + 端口至 `239.77.76.75:7777`，客户端无 URL 即可自发现
+- **NAT 自穿**（`dao_nat.js`）并行尝试 UPnP IGD → NAT-PMP 打开路由器映射，不依赖 cloudflared/ngrok 也能公网直达
+- **一码配对**（`dao_pair.js`）零依赖纯 JS QR 编码 + `dao://` URI，手机扫码 = 认身份 + 拿令牌 + 知坐标
+- **请求自知 URL** — 每条响应从请求 Host 头自描述，不再预设 `localhost:PORT`
+
+### 五感架构表
+
+| 能力 | 模块 | 依赖 |
+|------|------|------|
+| 令牌派生 | `dao_kernel.js::DaoIdentity.serviceToken()` | 纯 Node crypto (Ed25519) |
+| LAN 发现 | `remote-agent/dao_rendezvous.js` | 纯 Node dgram (UDP 多播) |
+| NAT 穿透 | `remote-agent/dao_nat.js` | 纯 Node dgram+http (SSDP+SOAP / NAT-PMP) |
+| QR 配对 | `remote-agent/dao_pair.js` | 纯 Node crypto+zlib (Reed-Solomon 手写) |
+
+**无一个新 npm 依赖**。
+
+## 环境变量（全部可选 · 所有字段都有确定性涌现路径）
+
+| 变量 | 涌现路径 | 说明 |
 |------|--------|------|
-| `PORT` | `3002` | Hub 端口 (默认3002, 占用则自动递增) |
-| `SCRCPY_HUB_PORT` | `8890` | scrcpy Hub 端口 |
-| `MJPEG_PORT` | `8081` | MJPEG 投屏端口 |
-| `INPUT_PORT` | `8084` | InputRoutes/ScreenStream 端口 |
-| `GHOST_SHELL_PORT` | `8000` | ghost_shell 端口 |
-| `DAO_REMOTE_PORT` | `9900` | dao-remote 端口 |
-| `ADB_HUB_PORT` | `9861` | adb_hub 端口 |
-| `ADB_HUB_TOKEN` | `adb_hub_2026` | adb_hub 认证令牌 |
-| `NO_TUNNEL` | `0` | 设为 1 禁用公网隧道 |
-| `PUBLIC_URL` | *(auto)* | 公网 URL (隧道建立后自动覆盖) |
+| `PORT` | 3002 → EADDRINUSE 自动 +1 重试 | Hub 首选端口 |
+| `SCRCPY_HUB_PORT` / `MJPEG_PORT` / `INPUT_PORT` / `GHOST_SHELL_PORT` / `DAO_REMOTE_PORT` / `ADB_HUB_PORT` / `SUNLOGIN_PORT` | 各自传统默认 → registry `portCandidates` 自动探测 | 各投屏/输入源首选端口 |
+| `ADB_HUB_TOKEN` | env → `~/.dao-remote/adb_hub.token` → `identity.serviceToken("adb_hub")` | **无字面量后备** |
+| `PS_AGENT_MASTER_TOKEN` | env → 身份签发 7 天 Ed25519 JWT | |
+| `PUBLIC_URL` | env → 隧道 URL → NAT 映射 URL → 请求自描述 | 不再预设 `localhost:PORT` |
+| `NO_TUNNEL` | `0` | `1` 禁用 cloudflared/ngrok/SSH |
+| `DAO_NO_NAT` | `0` | `1` 禁用 UPnP IGD / NAT-PMP 自穿 |
 
 > 详见 `.env.example`
 
@@ -179,10 +217,12 @@ npm install && npm start
 
 ```text
 ├── dao_crypto.js               # 密码学 — Ed25519/X25519/AES-256-GCM/令牌/速率限制
-├── dao_kernel.js               # 道核 — 熵源/身份/发现/能力/会话 (万物之源)
-├── dao.js                      # 入口 — 道生一, 一生二, 二生三, 三生万物
+├── dao_kernel.js               # 道核 — 熵源/身份/发现/能力/会话/工具检测 (万物之源)
+├── dao.js                      # 入口 — 道生一: 自动发现/启动 ghost_shell + Hub + Tunnel
+├── bin/ghost_shell.exe          # 投屏引擎 — Go原生GDI+SendInput+WASAPI (30fps/零依赖)
 ├── remote-agent/               # WebSocket 中枢
-│   ├── server.js              # 主服务: 6源投屏 + 5级输入 + 统一截屏
+│   ├── server.js              # 主服务: registry 驱动 discover/best/capture/input/proxy
+│   ├── dao_screen_registry.js # 一表定万法 — 所有投屏/输入源的单一事实表
 │   ├── page.js                # 前端: 投屏/触控/终端/诊断/系统信息
 │   ├── dao_bridge.js          # Relay 自动发现桥接 (道核Token)
 │   ├── dao_tunnel.js          # 自适应隧道 (cloudflared→ngrok→SSH)
@@ -198,12 +238,14 @@ npm install && npm start
 
 | 函数 | 位置 | 作用 |
 |------|------|------|
-| `captureScreenBest()` | server.js | 统一截屏: ghost→scrcpy→dao→adb_hub→agent，返回 {image, source} |
-| `sendInputToDevice()` | server.js | 统一输入: ghost→InputRoutes→adb_hub→dao→scrcpy，自适应 |
-| `discoverScreenSources()` | server.js | 6 源探测: 30s 轮询，状态变化实时通知 |
-| `getBestScreenSource()` | server.js | 优先级排序: ghost>scrcpy>dao>mjpeg>adb_hub>input |
-| `adbFallbackCmd()` | server.js | ADB 兜底: 万法皆空时回归原始 shell 命令 |
+| `ScreenRegistry.register()` | dao_screen_registry.js | 注册一行 → 自动参与 discover/best/capture/input/proxy |
+| `captureScreenBest()` | server.js | 3 行: 委派 `_screenReg.captureBest()` + Agent 兜底 |
+| `sendInputToDevice()` | server.js | 1 行: 委派 `_screenReg.inputBest()` |
+| `discoverScreenSources()` | server.js | 1 行: 委派 `_screenReg.probeAll()` |
+| `getBestScreenSource()` | server.js | 1 行: 委派 `_screenReg.best()` |
+| `startGhostShell()` | dao.js | 自动发现/启动 ghost_shell.exe (Go原生30fps投屏引擎) |
 | `getUnifiedAgentScript()` | server.js | 生成 PowerShell Agent: 多路径连接 + 屏幕推送 |
+| `_probeRemoteTools()` | dao_kernel.js | 远程工具自动检测: 扫描7种启动器(FS+进程) |
 
 ## License
 

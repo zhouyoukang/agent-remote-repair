@@ -4,18 +4,75 @@ const crypto = require("crypto");
 const os = require("os");
 const bridge = require("./dao_bridge");
 const { DaoKernel, DaoIdentity, DaoRateLimit } = require("../dao_kernel");
+const { SunloginBridge } = require("../dao_sunlogin");
+const { ScreenRegistry } = require("./dao_screen_registry");
+const daoPair = require("./dao_pair");
+
+// 万法之资: 向日葵深度集成 — config解析 + 云API + 全功能调用
+var _sunloginBridge = new SunloginBridge();
+try {
+  var slInit = _sunloginBridge.init();
+  if (slInit.ok) {
+    console.log(
+      "[sunlogin] 向日葵 v" +
+        slInit.version +
+        " | " +
+        slInit.hostname +
+        " | " +
+        slInit.plugins +
+        " plugins | " +
+        (slInit.running ? "运行中" : "未运行"),
+    );
+  }
+} catch (e) {
+  console.log("[sunlogin] init: " + e.message);
+}
 
 // 道核身份: Ed25519 非对称身份 (与dao.js共享同一密钥文件)
 var _daoIdentity = new DaoIdentity();
 // 速率限制: 20次/分钟/IP — 防暴力破解
 var _authLimiter = new DaoRateLimit(20, 60000);
+// 一码配对会话池 · 32-hex pairId → { token, expiresAt, used }
+// QR 仅带 pairId (32 字节 hex), 客户端 POST /pair/claim 换取真 token
+// 一次性 (used=true 后即删), 到期自动清理 — 柔弱胜刚强: 瞬遇即逝, 不留痕
+var _pairSessions = new Map();
+var _pairCleanTimer = setInterval(function () {
+  var now = Date.now();
+  _pairSessions.forEach(function (v, k) {
+    if (v.used || v.expiresAt < now) _pairSessions.delete(k);
+  });
+}, 30000);
+if (_pairCleanTimer && typeof _pairCleanTimer.unref === "function") {
+  _pairCleanTimer.unref();
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 道核注入 — 万物皆动, 一切从运行时涌现
 // dao.js 先 awaken() 再 require 此文件, 环境变量仅作过渡桥梁
 // ═══════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3002;
-var _publicUrl = process.env.PUBLIC_URL || "localhost:" + PORT;
+// 实际 listen 端口 (EADDRINUSE 重试后会偏移, 配对/发现端点须用此值而非 PORT 常量)
+var _listenPort = parseInt(PORT, 10);
+// 唯变所适 · 请求自知: 默认不对外预设任何 URL
+// · env 明指 → 以 env 为准 (隧道/反代场景)
+// · 无 env → 选一个 LAN IP 作后备表志 (用于日志显示与 tunnel 前的 best-effort)
+// · 仍无 → 空字符串; 实际回应的每条 URL 由 getReqHost(req) 从请求头自述
+// 道可道 非常少: 不再字面量外露 "localhost"
+var _publicUrl =
+  process.env.PUBLIC_URL ||
+  (function () {
+    try {
+      var nets = os.networkInterfaces();
+      for (var name of Object.keys(nets)) {
+        for (var iface of nets[name]) {
+          if (iface.family === "IPv4" && !iface.internal) {
+            return iface.address + ":" + PORT;
+          }
+        }
+      }
+    } catch (e) {}
+    return ""; // 令 URL 由每条请求的 Host 头自描述
+  })();
 var RELAY_PORT = parseInt(process.env.RELAY_PORT || "9910", 10);
 
 // 投屏链路: 万法之资 — 运行时探测, 环境覆盖仅为兼容
@@ -26,10 +83,41 @@ var SCREEN_PORTS = {
   ghost: parseInt(process.env.GHOST_SHELL_PORT || "8000", 10),
   dao: parseInt(process.env.DAO_REMOTE_PORT || "9900", 10),
   adb_hub: parseInt(process.env.ADB_HUB_PORT || "9861", 10),
+  sunlogin: parseInt(process.env.SUNLOGIN_PORT || "13333", 10),
 };
-var ADB_HUB_TOKEN = process.env.ADB_HUB_TOKEN || "adb_hub_2026";
-var _screenSources = new Map();
+// 道生令牌 · ADB_HUB_TOKEN 三级涌现 (道可道 非常少 — 无字面量后备):
+//   ① env 明指
+//   ② 缓存文件 ~/.dao-remote/adb_hub.token (同机协作共读)
+//   ③ Ed25519 serviceToken 确定性派生 (每身份唯一, 重启等价)
+// 三条或均失败 → throw, 不隐瞒问题
+var ADB_HUB_TOKEN = (function () {
+  if (process.env.ADB_HUB_TOKEN) return process.env.ADB_HUB_TOKEN;
+  var fs = require("fs");
+  var path = require("path");
+  var osMod = require("os");
+  var dir = path.join(osMod.homedir(), ".dao-remote");
+  var tokenFile = path.join(dir, "adb_hub.token");
+  try {
+    if (fs.existsSync(tokenFile)) {
+      var cached = fs.readFileSync(tokenFile, "utf-8").trim();
+      if (cached) return cached;
+    }
+  } catch (e) {}
+  // Ed25519 deterministic signing — 必成功而且跨重启一致
+  var token = _daoIdentity.serviceToken("adb_hub", 32);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+  } catch (e) {}
+  return token;
+})();
+// 一表定万法: 投屏/输入来源集中于注册表 — 增删改只需动一行
+var _screenReg = new ScreenRegistry();
+// _screenSources 是注册表状态的别名视图 — 所有 .get/.has/.forEach 消费者零改动
+var _screenSources = _screenReg.state;
 var _screenClients = new Set();
+// 万法之资: 远程工具注册表 — 道核发现的一切可用投屏/远程工具
+var _remoteTools = JSON.parse(process.env.DAO_REMOTE_TOOLS || "[]");
 
 // 道核状态 (由 dao.js 注入)
 var _daoFingerprint = process.env.DAO_FINGERPRINT || "";
@@ -228,70 +316,14 @@ function stopHostsGuard() {
 }
 
 // ==================== 投屏链路: 自动发现 · 适配一切 ====================
-// 道法自然: 不预设哪个投屏服务存在, 逐个探测, 用者自现
-function probeScreenSource(name, port, path) {
-  path = path || "/api/health";
-  return new Promise(function (resolve) {
-    var req = http.get(
-      "http://127.0.0.1:" + port + path,
-      { timeout: 2000 },
-      function (res) {
-        var d = "";
-        res.on("data", function (c) {
-          d += c;
-        });
-        res.on("end", function () {
-          _screenSources.set(name, {
-            url: "http://127.0.0.1:" + port,
-            status: "online",
-            lastCheck: Date.now(),
-            detail: d.substring(0, 200),
-          });
-          resolve(true);
-        });
-      },
-    );
-    req.on("error", function () {
-      _screenSources.set(name, {
-        url: "http://127.0.0.1:" + port,
-        status: "offline",
-        lastCheck: Date.now(),
-      });
-      resolve(false);
-    });
-    req.on("timeout", function () {
-      req.destroy();
-      resolve(false);
-    });
-  });
-}
-
+// 道法自然: 注册表驱动 — probe/best/capture/input 皆为一表之用
 function discoverScreenSources() {
-  return Promise.all([
-    probeScreenSource("scrcpy", SCREEN_PORTS.scrcpy, "/api/health"),
-    probeScreenSource("mjpeg", SCREEN_PORTS.mjpeg, "/stream/status"),
-    probeScreenSource("input", SCREEN_PORTS.input, "/status"),
-    probeScreenSource("ghost", SCREEN_PORTS.ghost, "/status"),
-    probeScreenSource("dao", SCREEN_PORTS.dao, "/status"),
-    probeScreenSource("adb_hub", SCREEN_PORTS.adb_hub, "/api/adb/devices"),
-  ]).then(function (results) {
-    var found = [];
-    _screenSources.forEach(function (v, k) {
-      if (v.status === "online") found.push(k);
-    });
-    return found;
-  });
+  return _screenReg.probeAll();
 }
 
-// 道法自然: 反者道之动 — 优先级自适应
-// ghost_shell(30fps最强) → scrcpy(安卓最强) → dao(亲情远程) → MJPEG(最稳) → adb_hub(ADB全控) → Agent截屏
+// 反者道之动 — 优先级自适应，源自注册表单一事实
 function getBestScreenSource() {
-  var order = ["ghost", "scrcpy", "dao", "mjpeg", "adb_hub", "input"];
-  for (var i = 0; i < order.length; i++) {
-    var src = _screenSources.get(order[i]);
-    if (src && src.status === "online") return { name: order[i], url: src.url };
-  }
-  return null;
+  return _screenReg.best();
 }
 
 // 代理请求到投屏服务 — 万法归宗: 一个端口接入一切
@@ -395,85 +427,29 @@ function _captureFromHttp(url, sourceName) {
   });
 }
 
-// 万法归宗: 统一截屏 — 按优先级遍历一切投屏源, 返回 {ok, image, source, width, height}
-// ghost → scrcpy → dao → adb_hub → agent screencap
+// 万法归宗: 统一截屏 — 注册表按优先级遍历, 全部失败则回落到 Agent 截屏
+// 优先级/分支仅定义在注册表, 此处是纯委派
 function captureScreenBest(hostname, serial) {
-  var ghostSrc = _screenSources.get("ghost");
-  if (ghostSrc && ghostSrc.status === "online") {
-    return _captureFromHttp(ghostSrc.url + "/capture", "ghost");
-  }
-  var scrcpySrc = _screenSources.get("scrcpy");
-  if (scrcpySrc && scrcpySrc.status === "online") {
-    return captureScreenViaScrcpy(serial).then(function (r) {
-      var img = r.image || r.screenshot || "";
-      if (img && !img.startsWith("data:")) img = "data:image/png;base64," + img;
-      return {
-        ok: true,
-        image: img,
-        source: "scrcpy",
-        width: r.width,
-        height: r.height,
-      };
+  return _screenReg
+    .captureBest({ hostname: hostname, serial: serial })
+    .then(function (r) {
+      if (r) return r;
+      // 兜底: Agent 端 PowerShell 截屏 — 无投屏服务也能看屏
+      return captureScreenViaAgent(hostname).then(function (ag) {
+        return {
+          ok: ag.ok,
+          image: "data:image/jpeg;base64," + (ag.output || "").trim(),
+          source: "agent",
+          ms: ag.ms,
+        };
+      });
     });
-  }
-  var daoSrc = _screenSources.get("dao");
-  if (daoSrc && daoSrc.status === "online") {
-    return _captureFromHttp(daoSrc.url + "/capture", "dao");
-  }
-  var adbSrc = _screenSources.get("adb_hub");
-  if (adbSrc && adbSrc.status === "online") {
-    return _captureFromHttp(
-      adbSrc.url +
-        "/api/adb/screencap?device=" +
-        (serial || "") +
-        "&token=" +
-        ADB_HUB_TOKEN,
-      "adb_hub",
-    );
-  }
-  return captureScreenViaAgent(hostname).then(function (r) {
-    return {
-      ok: r.ok,
-      image: "data:image/jpeg;base64," + (r.output || "").trim(),
-      source: "agent",
-      width: null,
-      height: null,
-    };
-  });
 }
 
 // 万法之资: 发送输入到设备 — 自适应一切输入源
-// ghost_shell → InputRoutes → adb_hub → dao-remote → scrcpy → ADB fallback
+// 注册表按 priority 遍历, 定义于 _screenReg.register() 一处
 function sendInputToDevice(action, params, serial) {
-  // ═══ 第一优先: ghost_shell (Windows桌面30fps控制) ═══
-  var ghostSrc = _screenSources.get("ghost");
-  if (ghostSrc && ghostSrc.status === "online") {
-    return _postToSource(ghostSrc.url + "/interact", _ghostCmd(action, params));
-  }
-  // ═══ 第二优先: InputRoutes (8084/8081) — Android 120+API ═══
-  var inputSrc = _screenSources.get("input") || _screenSources.get("mjpeg");
-  if (inputSrc && inputSrc.status === "online") {
-    return _postToSource(inputSrc.url + "/" + action, params);
-  }
-  // ═══ 第三优先: adb_hub (9861) — ADB全控中枢 ═══
-  var adbHubSrc = _screenSources.get("adb_hub");
-  if (adbHubSrc && adbHubSrc.status === "online") {
-    return _adbHubInput(adbHubSrc.url, action, params, serial);
-  }
-  // ═══ 第四优先: dao-remote (9900) — 亲情远程Go版 ═══
-  var daoSrc = _screenSources.get("dao");
-  if (daoSrc && daoSrc.status === "online") {
-    return _postToSource(daoSrc.url + "/interact", _ghostCmd(action, params));
-  }
-  // ═══ 第五优先: scrcpy Hub API ═══
-  var scrcpySrc = _screenSources.get("scrcpy");
-  if (scrcpySrc && scrcpySrc.status === "online") {
-    return _postToSource(
-      scrcpySrc.url + "/api/" + action,
-      Object.assign({ serial: serial || "" }, params),
-    );
-  }
-  return Promise.reject(new Error("no input source available"));
+  return _screenReg.inputBest(action, params || {}, serial || "");
 }
 
 // 通用HTTP POST helper — 道法自然: 一法通万法
@@ -680,6 +656,159 @@ function _getFromSource(url) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// 一表定万法 · Screen Source Registry
+// 每个来源 = 一行。 增/删/改/调优先级都只动一处。
+// 分类正确: capture/input 为 null = 不参与屏幕/输入路由, 只为 /status 可见
+// ═══════════════════════════════════════════════════════════════════
+
+// ── ghost_shell (Windows 30fps GDI+SendInput) ─────────────────────
+_screenReg.register({
+  id: "ghost",
+  name: "Ghost Shell",
+  priority: 10,
+  port: SCREEN_PORTS.ghost,
+  healthPath: "/status",
+  capture: function (ctx, url) {
+    return _captureFromHttp(url + "/capture", "ghost");
+  },
+  input: function (action, params, serial, url) {
+    return _postToSource(url + "/interact", _ghostCmd(action, params));
+  },
+});
+
+// ── scrcpy Hub (Android) ─────────────────────────────────────────
+// 外部服务: 端口可能因冲突而上移 — 探 3 候选, 柔弱胜刚强
+_screenReg.register({
+  id: "scrcpy",
+  name: "scrcpy Hub",
+  priority: 20,
+  portCandidates: [
+    SCREEN_PORTS.scrcpy,
+    SCREEN_PORTS.scrcpy + 1,
+    SCREEN_PORTS.scrcpy + 2,
+  ],
+  healthPath: "/api/health",
+  capture: function (ctx, url) {
+    return captureScreenViaScrcpy(ctx.serial).then(function (r) {
+      var img = r.image || r.screenshot || "";
+      if (img && !img.startsWith("data:")) {
+        img = "data:image/png;base64," + img;
+      }
+      return {
+        ok: true,
+        image: img,
+        source: "scrcpy",
+        width: r.width,
+        height: r.height,
+      };
+    });
+  },
+  input: function (action, params, serial, url) {
+    return _postToSource(
+      url + "/api/" + action,
+      Object.assign({ serial: serial || "" }, params),
+    );
+  },
+});
+
+// ── dao-remote (Go 版亲情远程) ───────────────────────────────────
+_screenReg.register({
+  id: "dao",
+  name: "dao-remote",
+  priority: 30,
+  port: SCREEN_PORTS.dao,
+  healthPath: "/status",
+  capture: function (ctx, url) {
+    return _captureFromHttp(url + "/capture", "dao");
+  },
+  input: function (action, params, serial, url) {
+    return _postToSource(url + "/interact", _ghostCmd(action, params));
+  },
+});
+
+// ── InputRoutes (8084) · 输入专用 (Android 120+ API) ─────────────
+// 仅输入, 无截屏能力 — capture 留空
+_screenReg.register({
+  id: "input",
+  name: "InputRoutes",
+  priority: 40,
+  port: SCREEN_PORTS.input,
+  healthPath: "/status",
+  capture: null,
+  input: function (action, params, serial, url) {
+    return _postToSource(url + "/" + action, params);
+  },
+});
+
+// ── MJPEG (8081) · 截屏流 + 同端口输入 ─────────────────────────
+// 外部服务: 给 3 候选端口, 适应多实例或端口冲突场景
+_screenReg.register({
+  id: "mjpeg",
+  name: "MJPEG",
+  priority: 50,
+  portCandidates: [
+    SCREEN_PORTS.mjpeg,
+    SCREEN_PORTS.mjpeg + 1,
+    SCREEN_PORTS.mjpeg + 2,
+  ],
+  healthPath: "/stream/status",
+  capture: function (ctx, url) {
+    return _captureFromHttp(url + "/capture", "mjpeg");
+  },
+  input: function (action, params, serial, url) {
+    return _postToSource(url + "/" + action, params);
+  },
+});
+
+// ── adb_hub · 全控中枢 ───────────────────────────────────────────
+// 外部服务: 给 3 候选端口
+_screenReg.register({
+  id: "adb_hub",
+  name: "adb_hub",
+  priority: 60,
+  portCandidates: [
+    SCREEN_PORTS.adb_hub,
+    SCREEN_PORTS.adb_hub + 1,
+    SCREEN_PORTS.adb_hub + 2,
+  ],
+  healthPath: "/api/adb/devices",
+  capture: function (ctx, url) {
+    return _captureFromHttp(
+      url +
+        "/api/adb/screencap?device=" +
+        (ctx.serial || "") +
+        "&token=" +
+        ADB_HUB_TOKEN,
+      "adb_hub",
+    );
+  },
+  input: function (action, params, serial, url) {
+    return _adbHubInput(url, action, params, serial);
+  },
+});
+
+// ── 向日葵 · 分类正确: 启动器, 非流源 ──────────────────────────
+// v15 无本地 HTTP API. 通过 /tools/launch 调用主控界面.
+// probe 仅为 /status 可见; capture/input=null → 不参与屏幕/输入路由
+_screenReg.register({
+  id: "sunlogin",
+  name: "向日葵",
+  priority: 99,
+  url: "bridge://sunlogin",
+  probe: function () {
+    if (!_sunloginBridge.ready) return false;
+    try {
+      var ps = _sunloginBridge.refreshProcess();
+      return !!ps.running;
+    } catch (e) {
+      return false;
+    }
+  },
+  capture: null,
+  input: null,
+});
+
 // ==================== ADB兜底: 万法之资 — 无服务也能控 ====================
 // 道法自然: 将高层action映射为原始ADB命令, 适配一切Android设备
 function adbFallbackCmd(action, params) {
@@ -813,6 +942,129 @@ function forwardTerminal(id, cmd, output, ok) {
 function getSensePage(req) {
   var reqHost = getReqHost(req);
   return require("./page.js")(reqHost, MASTER_TOKEN);
+}
+
+// ==================== PWA CLAIM LANDING PAGE ====================
+// 荃者所以在鱼 · 得鱼而忘荃 — 扫码即入, 二次免扫 (TOFU localStorage)
+function getClaimLandingPage() {
+  return (
+    '<!DOCTYPE html><html lang="zh-cn"><head>' +
+    '<meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' +
+    '<meta name="theme-color" content="#0b0b0b">' +
+    '<link rel="manifest" href="/manifest.webmanifest">' +
+    '<link rel="icon" type="image/svg+xml" href="/icon.svg">' +
+    "<title>道 · 认身份</title>" +
+    "<style>" +
+    "*{box-sizing:border-box;margin:0;padding:0}" +
+    "body{background:#0b0b0b;color:#eee;font-family:-apple-system,Segoe UI,Roboto,sans-serif;" +
+    "min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;" +
+    "justify-content:center;padding:32px;gap:24px;text-align:center}" +
+    ".ring{width:120px;height:120px;border:3px solid #222;border-top-color:#4af;border-radius:50%;" +
+    "animation:spin 1s linear infinite}" +
+    "@keyframes spin{to{transform:rotate(360deg)}}" +
+    "h1{font-size:24px;font-weight:300;letter-spacing:.2em;color:#eee}" +
+    ".status{color:#888;font-size:14px;line-height:1.6;max-width:320px}" +
+    ".fp{font-family:ui-monospace,monospace;color:#4af;font-size:12px;letter-spacing:.1em}" +
+    ".err{color:#f55;font-size:13px;margin-top:8px}" +
+    ".btn{background:#4af;color:#000;border:none;padding:14px 28px;border-radius:8px;" +
+    "font-size:14px;font-weight:500;letter-spacing:.1em;cursor:pointer;margin-top:12px}" +
+    ".btn:hover{background:#6bf}" +
+    ".muted{color:#555;font-size:11px;margin-top:16px}" +
+    "</style>" +
+    "</head><body>" +
+    '<div class="ring" id="ring"></div>' +
+    "<h1>道 · 认身份</h1>" +
+    '<div class="status" id="status">正在与本机相认…</div>' +
+    '<div class="fp" id="fp"></div>' +
+    '<div id="action"></div>' +
+    '<div class="muted">荃者所以在鱼 · 得鱼而忘荃</div>' +
+    "<script>" +
+    '(function(){"use strict";' +
+    // 解析 location.hash — 支持 "pairId.fingerprint" 和 "dao://..." 两种格式
+    "var hash=(location.hash||'').replace(/^#/,'');" +
+    "var pairId='',fp='';" +
+    "if(hash.indexOf('.')>0&&hash.indexOf('://')<0){" +
+    "  var a=hash.split('.');pairId=a[0]||'';fp=a[1]||'';" +
+    "}else if(hash.indexOf('dao://')===0){" +
+    "  try{" +
+    "    var u=new URL(hash.replace('dao://','https://x/'));" +
+    "    var pp=u.pathname.replace(/^\\//,'').split('/');" +
+    "    fp=u.host==='x'?(pp[0]||''):u.host;" +
+    "    pairId=u.host==='x'?(pp[1]||''):(pp[0]||'');" +
+    "  }catch(e){}" +
+    "}" +
+    "var S=document.getElementById('status');" +
+    "var FP=document.getElementById('fp');" +
+    "var R=document.getElementById('ring');" +
+    "var A=document.getElementById('action');" +
+    "function err(m){R.style.borderTopColor='#f55';S.textContent=m;S.className='err';}" +
+    "function ok(m){S.textContent=m;}" +
+    "if(fp)FP.textContent='指纹 '+fp;" +
+    // 尝试从 localStorage 读 TOFU 缓存 (指纹匹配且未过期则直接跳 sense)
+    //   无 hash 时 (用户直接访问 /c) 遍历 localStorage 找任意未过期记录 — 二次回家即入
+    "function tryTofu(targetFp){" +
+    "  try{" +
+    "    if(targetFp){" +
+    "      var c=JSON.parse(localStorage.getItem('dao-tofu-'+targetFp)||'null');" +
+    "      if(c&&c.token&&c.expiresAt&&c.expiresAt*1000>Date.now()+30000)return c;" +
+    "    }else{" +
+    "      for(var i=0;i<localStorage.length;i++){" +
+    "        var k=localStorage.key(i);" +
+    "        if(!k||k.indexOf('dao-tofu-')!==0)continue;" +
+    "        var v=JSON.parse(localStorage.getItem(k)||'null');" +
+    "        if(v&&v.token&&v.expiresAt&&v.expiresAt*1000>Date.now()+30000)return v;" +
+    "      }" +
+    "    }" +
+    "  }catch(e){}" +
+    "  return null;" +
+    "}" +
+    "var cached=tryTofu(fp);" +
+    "if(cached){" +
+    "  ok('认得 · 直接入');" +
+    "  setTimeout(function(){location.href='/sense?token='+encodeURIComponent(cached.token);},300);" +
+    "  return;" +
+    "}" +
+    // 无缓存或过期 — 走 /pair/claim 兑换新 token (需要 pairId)
+    "if(!pairId||!/^[0-9a-f]{32}$/.test(pairId)){" +
+    "  err('未认得此设备 · 请在道核上生成新 QR 并扫码');" +
+    "  A.innerHTML='<div style=\"color:#666;font-size:12px;margin-top:20px;line-height:1.8\">在电脑端打开 <b>/pair</b> 页面 · 用手机扫 QR · 自动完成相认</div>';" +
+    "  return;" +
+    "}" +
+    "ok('正在兑换令牌…');" +
+    "fetch('/pair/claim',{method:'POST',headers:{'Content-Type':'application/json'}," +
+    "body:JSON.stringify({pairId:pairId})})" +
+    ".then(function(r){return r.json().then(function(j){return{s:r.status,j:j};});})" +
+    ".then(function(x){" +
+    "  if(!x.j.ok){" +
+    "    if(x.j.error==='not_found_or_used'||x.j.error==='already_claimed'){" +
+    "      err('此 QR 已被使用 · 请重新生成');" +
+    "    }else if(x.j.error==='expired'){" +
+    "      err('此 QR 已过期 · 请重新生成');" +
+    "    }else{" +
+    "      err('兑换失败: '+(x.j.error||'unknown'));" +
+    "    }" +
+    '    A.innerHTML=\'<button class="btn" onclick="location.reload()">重试</button>\';' +
+    "    return;" +
+    "  }" +
+    // 成功: TOFU 记忆 + 跳 sense
+    "  try{" +
+    "    localStorage.setItem('dao-tofu-'+x.j.fingerprint,JSON.stringify({" +
+    "      token:x.j.token,expiresAt:x.j.expiresAt," +
+    "      ips:x.j.ips||[],publicUrl:x.j.publicUrl||'',port:x.j.port," +
+    "      firstSeen:Math.floor(Date.now()/1000)" +
+    "    }));" +
+    "  }catch(e){}" +
+    "  R.style.borderTopColor='#4f4';" +
+    "  ok('相认成功 · 正在进入…');" +
+    "  setTimeout(function(){location.href='/sense?token='+encodeURIComponent(x.j.token);},400);" +
+    "})" +
+    ".catch(function(e){err('网络失败: '+e.message);" +
+    '  A.innerHTML=\'<button class="btn" onclick="location.reload()">重试</button>\';});' +
+    "})();" +
+    "</script>" +
+    "</body></html>"
+  );
 }
 
 // ==================== ANALYSIS ENGINE (BROWSER DIAG) ====================
@@ -1469,6 +1721,310 @@ const server = http.createServer(function (req, res) {
     res.end(getUnifiedAgentScript(req));
     return;
   }
+  // ── 道 · /dao/discover — 五感之根: 身份 + LAN IP + 端口 + NAT 状态
+  //    零 token 权限: 仅返回公开信息 (fingerprint/ips/port/publicUrl)
+  //    供客户端从鉴旧 URL 即时知晓 hub 实际身份, 避免酵健廢教 URL
+  if (req.method === "GET" && url.pathname === "/dao/discover") {
+    var ips = getAllLanIPs();
+    var natStatus = null;
+    try {
+      if (global.__daoNat && global.__daoNat.mapping)
+        natStatus = global.__daoNat.mapping;
+    } catch (e) {}
+    jsonReply(res, {
+      version: 1,
+      fingerprint: _daoFingerprint,
+      port: _listenPort,
+      ips: ips,
+      publicUrl: _publicUrl || "",
+      reqHost: getReqHost(req),
+      reqProto: getReqHttpProto(req),
+      nat: natStatus,
+      ts: Math.floor(Date.now() / 1000),
+    });
+    return;
+  }
+  // ── 道 · /pair — 一码配对 ──
+  //   GET /pair?format=json|svg|ascii|png&ttl=600  (默认返 HTML 可视化页)
+  //   需 token 权限 (用户已授权才能生成新配对链接)
+  if (req.method === "GET" && url.pathname === "/pair") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    var fmt = (url.searchParams.get("format") || "html").toLowerCase();
+    var ttl = parseInt(url.searchParams.get("ttl") || "600", 10);
+    if (!(ttl > 0)) ttl = 600;
+    if (ttl > 86400) ttl = 86400;
+    // 道生一 · QR 小则活: 生成 32 字节 pairId, 客户端 POST /pair/claim 兑换真 token
+    //   这样 URI 里没有长 token (Ed25519 JWT 228 字符, 超 QR v10-L 容量)
+    //   一次性 + 10 分钟 TTL + 到期自删 — 比直接塞 token 更安全
+    var pairId = crypto.randomBytes(16).toString("hex");
+    var longToken = _daoIdentity.createToken(ttl, { role: "pair" });
+    var expiresAt = Math.floor(Date.now() / 1000) + ttl;
+    _pairSessions.set(pairId, {
+      token: longToken,
+      expiresAt: Date.now() + ttl * 1000,
+      used: false,
+    });
+    var ips = getAllLanIPs();
+    var natMap = null;
+    try {
+      if (global.__daoNat && global.__daoNat.mapping)
+        natMap = global.__daoNat.mapping;
+    } catch (e) {}
+    var pub = _publicUrl || getReqHost(req) || "";
+    var daoUri = daoPair.buildPairUri({
+      fingerprint: _daoFingerprint,
+      token: pairId,
+      port: _listenPort,
+      ips: ips,
+      publicUrl:
+        pub.indexOf("://") >= 0
+          ? pub
+          : pub
+            ? getReqHttpProto(req) + "://" + pub
+            : "",
+      externalIP: natMap ? natMap.externalIP : "",
+      externalPort: natMap ? natMap.externalPort : 0,
+      expiresAt: expiresAt,
+    });
+    // 道法自然 · 浏览器友好 QR: 扫码直接跳浏览器落地页 (手机无需装 App)
+    //   格式: <proto>://<host>:<port>/c#<pairId>.<fp>
+    //   落地页 JS 自动 claim + TOFU 记忆 + 跳 /sense
+    var proto = getReqHttpProto(req);
+    var host = "";
+    if (pub) {
+      host = pub.indexOf("://") >= 0 ? pub.split("://")[1] : pub;
+      host = host.replace(/\/$/, "");
+    } else {
+      host = (ips[0] || "127.0.0.1") + ":" + _listenPort;
+    }
+    var webUri = proto + "://" + host + "/c#" + pairId + "." + _daoFingerprint;
+    if (fmt === "json") {
+      jsonReply(res, {
+        uri: webUri,
+        webUri: webUri,
+        daoUri: daoUri,
+        pairId: pairId,
+        fingerprint: _daoFingerprint,
+        port: _listenPort,
+        ips: ips,
+        publicUrl: pub,
+        nat: natMap,
+        expiresAt: expiresAt,
+        ttlSec: ttl,
+        claimUrl: "/pair/claim",
+      });
+      return;
+    }
+    // QR 编码浏览器 URL (用户扫码直接打开手机默认浏览器 → /c 落地页自动 claim)
+    var uri = webUri;
+    var qr;
+    try {
+      qr = daoPair.qrFromText(uri, "L");
+    } catch (e) {
+      jsonReply(res, { error: "qr encode failed: " + e.message }, 500);
+      return;
+    }
+    if (fmt === "svg") {
+      var svg = daoPair.renderSvg(qr, { scale: 8, border: 4 });
+      res.writeHead(200, {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      res.end(svg);
+      return;
+    }
+    if (fmt === "png") {
+      var png = daoPair.renderPng(qr, { scale: 8, border: 4 });
+      res.writeHead(200, {
+        "Content-Type": "image/png",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "Content-Length": png.length,
+      });
+      res.end(png);
+      return;
+    }
+    if (fmt === "ascii") {
+      var ascii = daoPair.renderAscii(qr, { border: 2 });
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.end(ascii + "\n\nURI:\n" + uri + "\n\nExpires in " + ttl + "s\n");
+      return;
+    }
+    // default: HTML 可视化页
+    var svgInline = daoPair.renderSvg(qr, { scale: 8, border: 4 });
+    var expireTxt = new Date(
+      (Math.floor(Date.now() / 1000) + ttl) * 1000,
+    ).toISOString();
+    // 从本次请求抽取 token (query 或 Authorization), 传递到子链接
+    var myTok = url.searchParams.get("token") || "";
+    if (!myTok) {
+      var auth = (req.headers || {}).authorization || "";
+      if (auth.startsWith("Bearer ")) myTok = auth.slice(7);
+    }
+    var tokQS = myTok ? "&token=" + encodeURIComponent(myTok) : "";
+    var html =
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>道 · 配对</title>' +
+      "<style>body{background:#0b0b0b;color:#eee;font-family:monospace;margin:0;padding:40px;display:flex;flex-direction:column;align-items:center;gap:20px}" +
+      ".qr{background:#fff;padding:12px;border-radius:12px;box-shadow:0 8px 48px rgba(0,0,0,.5)}" +
+      ".uri{word-break:break-all;max-width:90vw;background:#111;padding:16px;border-radius:8px;border:1px solid #333;font-size:12px;line-height:1.6}" +
+      ".meta{color:#888;font-size:12px;text-align:center}" +
+      "h1{font-weight:300;letter-spacing:.2em;margin:0}" +
+      ".fp{color:#4af}</style></head><body>" +
+      "<h1>道 &nbsp;·&nbsp; 一码配对</h1>" +
+      '<div class="qr">' +
+      svgInline +
+      "</div>" +
+      '<div class="uri">' +
+      uri.replace(/&/g, "&amp;").replace(/</g, "&lt;") +
+      "</div>" +
+      '<div class="meta">指纹 <span class="fp">' +
+      (_daoFingerprint || "?") +
+      "</span> &nbsp;·&nbsp; " +
+      "TTL " +
+      ttl +
+      "s &nbsp;·&nbsp; 失效 " +
+      expireTxt +
+      "</div>" +
+      '<div class="meta">扫一扫 = 认身份 + 拿令牌 + 知坐标 &nbsp;·&nbsp; ' +
+      '打印全文本: <a style="color:#4af" href="/pair?format=ascii' +
+      tokQS +
+      '" target="_blank">ASCII</a> ' +
+      '&nbsp;·&nbsp; PNG: <a style="color:#4af" href="/pair?format=png' +
+      tokQS +
+      '" target="_blank">下载</a></div>' +
+      "</body></html>";
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+    });
+    res.end(html);
+    return;
+  }
+  // ── 道 · /c — PWA 落地页 ──
+  //   QR 扫码跳 /c#<base64url(pairId,fp,port,ips,pu,exp)>
+  //   浏览器打开 → JS 解析 hash → POST /pair/claim 换 token → TOFU 写 localStorage → 跳 /sense?token=X
+  //   再次访问 /c: 从 localStorage 读 token, 指纹匹配则直接跳 /sense, 无需再扫
+  //   荃者所以在鱼 · 得鱼而忘荃: 扫一次永久在, 用户忘记扫码这件事
+  if (req.method === "GET" && url.pathname === "/c") {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end(getClaimLandingPage());
+    return;
+  }
+  // ── 道 · /manifest.webmanifest — PWA 可安装清单 ──
+  if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
+    res.writeHead(200, {
+      "Content-Type": "application/manifest+json; charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
+    });
+    res.end(
+      JSON.stringify({
+        name: "道 · 远程中枢",
+        short_name: "道",
+        description: "Ed25519 端到端 · 扫码即入 · 永不忘忆",
+        start_url: "/c",
+        scope: "/",
+        display: "standalone",
+        background_color: "#0b0b0b",
+        theme_color: "#0b0b0b",
+        icons: [
+          {
+            src: "/icon.svg",
+            sizes: "any",
+            type: "image/svg+xml",
+            purpose: "any",
+          },
+        ],
+      }),
+    );
+    return;
+  }
+  // ── 道 · /icon.svg — PWA 图标 (极简太极) ──
+  if (req.method === "GET" && url.pathname === "/icon.svg") {
+    var icon =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
+      '<rect width="512" height="512" fill="#0b0b0b"/>' +
+      '<circle cx="256" cy="256" r="200" fill="none" stroke="#eee" stroke-width="8"/>' +
+      '<path d="M256 56 A200 200 0 0 1 256 456 A100 100 0 0 1 256 256 A100 100 0 0 0 256 56 Z" fill="#eee"/>' +
+      '<circle cx="256" cy="156" r="28" fill="#0b0b0b"/>' +
+      '<circle cx="256" cy="356" r="28" fill="#eee"/>' +
+      "</svg>";
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(icon);
+    return;
+  }
+  // ── 道 · /pair/claim — 一次性兑换: pairId → Ed25519 长 token ──
+  //   POST /pair/claim   body: { pairId } or ?pairId=...
+  //   成功: { ok, token, fingerprint, expiresAt, ttlSec } (token 只有此时下发一次)
+  //   失败: 404/410 (不存在/已用/到期)
+  //   零 token 权限: 本身就是身份验证的入口, 但有 pairId 未知性保护
+  //   并有速率限制 + 一次性使用
+  if (req.method === "POST" && url.pathname === "/pair/claim") {
+    var clientIP = (
+      (req.socket || req.connection || {}).remoteAddress || ""
+    ).replace(/^::ffff:/, "");
+    if (!_authLimiter.check(clientIP)) {
+      jsonReply(res, { ok: false, error: "rate_limited" }, 429);
+      return;
+    }
+    readBody(req, function (body) {
+      var pid = "";
+      try {
+        if (body) {
+          var m = JSON.parse(body);
+          pid = (m && m.pairId) || "";
+        }
+      } catch (e) {}
+      if (!pid) pid = url.searchParams.get("pairId") || "";
+      if (!pid || !/^[0-9a-f]{32}$/.test(pid)) {
+        jsonReply(res, { ok: false, error: "bad_pair_id" }, 400);
+        return;
+      }
+      var sess = _pairSessions.get(pid);
+      if (!sess) {
+        jsonReply(res, { ok: false, error: "not_found_or_used" }, 404);
+        return;
+      }
+      if (sess.used) {
+        _pairSessions.delete(pid);
+        jsonReply(res, { ok: false, error: "already_claimed" }, 410);
+        return;
+      }
+      if (sess.expiresAt < Date.now()) {
+        _pairSessions.delete(pid);
+        jsonReply(res, { ok: false, error: "expired" }, 410);
+        return;
+      }
+      // 一次性: 成功即删 — 瞬遇即逝
+      sess.used = true;
+      _pairSessions.delete(pid);
+      var expSec = Math.floor(sess.expiresAt / 1000);
+      jsonReply(res, {
+        ok: true,
+        token: sess.token,
+        fingerprint: _daoFingerprint,
+        port: _listenPort,
+        ips: getAllLanIPs(),
+        publicUrl: _publicUrl || "",
+        expiresAt: expSec,
+        ttlSec: expSec - Math.floor(Date.now() / 1000),
+      });
+    });
+    return;
+  }
   // ── 道 · /status — system status JSON ──
   if (req.method === "GET" && url.pathname === "/status") {
     var screenObj = {};
@@ -1494,7 +2050,161 @@ const server = http.createServer(function (req, res) {
       relay: { port: RELAY_PORT, url: bridge.relayUrl },
       agents: getAgentList(),
       screen: { sources: screenObj, best: getBestScreenSource() },
+      remoteTools: _remoteTools,
+      sunlogin: _sunloginBridge.ready
+        ? {
+            version: _sunloginBridge.deviceInfo.version,
+            hostname: _sunloginBridge.deviceInfo.hostname,
+            running: _sunloginBridge.processStatus.running,
+            plugins: _sunloginBridge.capabilities.plugins.length,
+            features: _sunloginBridge.getFullStatus().features,
+          }
+        : null,
     });
+    return;
+  }
+  // ── 万法之资: /tools — 远程工具注册表 — 适配一切, 自动发现 ──
+  if (req.method === "GET" && url.pathname === "/tools") {
+    // 道法自然: 返回道核发现的一切已安装远程工具 + 实时状态
+    var tools = _remoteTools.map(function (t) {
+      var src = t.port ? _screenSources.get(t.id) : null;
+      return {
+        id: t.id,
+        name: t.name,
+        path: t.path,
+        running: t.running,
+        port: t.port,
+        api: t.api,
+        online: src ? src.status === "online" : false,
+      };
+    });
+    jsonReply(res, { ok: true, tools: tools, count: tools.length });
+    return;
+  }
+  // ── 一键调用: /tools/launch — 自动打开用户已安装的投屏工具 ──
+  if (req.method === "POST" && url.pathname === "/tools/launch") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    readBody(req, function (body) {
+      try {
+        var m = JSON.parse(body);
+        var toolId = m.id || "";
+        var tool = _remoteTools.find(function (t) {
+          return t.id === toolId;
+        });
+        if (!tool || !tool.path) {
+          jsonReply(res, {
+            ok: false,
+            error: "工具未找到或无可执行路径: " + toolId,
+          });
+          return;
+        }
+        // 万法归宗: 优先通过Agent远程启动, 无Agent则本地启动
+        var defAgent = getDefaultAgent();
+        if (defAgent) {
+          execOnAgent(
+            'Start-Process "' + tool.path.replace(/\\/g, "\\\\") + '"',
+            8000,
+          )
+            .then(function (r) {
+              jsonReply(res, {
+                ok: true,
+                tool: tool.name,
+                via: "agent",
+                output: r.output,
+              });
+            })
+            .catch(function (e) {
+              jsonReply(res, { ok: false, tool: tool.name, error: e.message });
+            });
+        } else {
+          // 无Agent: 本地启动
+          try {
+            require("child_process")
+              .spawn(tool.path, [], {
+                detached: true,
+                stdio: "ignore",
+                windowsHide: false,
+              })
+              .unref();
+            jsonReply(res, { ok: true, tool: tool.name, via: "local" });
+          } catch (e) {
+            jsonReply(res, { ok: false, tool: tool.name, error: e.message });
+          }
+        }
+      } catch (e) {
+        jsonReply(res, { error: "bad json" }, 400);
+      }
+    });
+    return;
+  }
+  // ── /tools/auto — 无为而无不为: 自动启动最优远程工具 ──
+  if (req.method === "POST" && url.pathname === "/tools/auto") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    // 道法自然: 先检查是否已有投屏源在线, 有则无需启动
+    var best = getBestScreenSource();
+    if (best) {
+      jsonReply(res, {
+        ok: true,
+        action: "none",
+        reason: "已有投屏源在线: " + best.name,
+        best: best,
+      });
+      return;
+    }
+    // 无投屏源 → 自动启动第一个可用工具
+    var launchable = _remoteTools.find(function (t) {
+      return t.path;
+    });
+    if (!launchable) {
+      jsonReply(res, { ok: false, error: "未发现任何已安装的远程工具" });
+      return;
+    }
+    var defAgent = getDefaultAgent();
+    if (defAgent) {
+      execOnAgent(
+        'Start-Process "' + launchable.path.replace(/\\/g, "\\\\") + '"',
+        8000,
+      )
+        .then(function (r) {
+          jsonReply(res, {
+            ok: true,
+            action: "launched",
+            tool: launchable.name,
+            via: "agent",
+          });
+        })
+        .catch(function (e) {
+          jsonReply(res, {
+            ok: false,
+            tool: launchable.name,
+            error: e.message,
+          });
+        });
+    } else {
+      try {
+        require("child_process")
+          .spawn(launchable.path, [], {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: false,
+          })
+          .unref();
+        jsonReply(res, {
+          ok: true,
+          action: "launched",
+          tool: launchable.name,
+          via: "local",
+        });
+      } catch (e) {
+        jsonReply(res, { ok: false, tool: launchable.name, error: e.message });
+      }
+    }
     return;
   }
   // ── ps-agent proxy: /relay/* → localhost:RELAY_PORT/* ──
@@ -1517,6 +2227,7 @@ const server = http.createServer(function (req, res) {
         available: found,
         sources: sources,
         best: getBestScreenSource(),
+        remoteTools: _remoteTools,
       });
     });
     return;
@@ -1525,10 +2236,11 @@ const server = http.createServer(function (req, res) {
     var mode = url.searchParams.get("mode") || "auto";
     var serial = url.searchParams.get("serial") || "";
     var hostname = url.searchParams.get("hostname") || "";
-    // 万法之资: 按优先级尝试截屏 — ghost > scrcpy > adb_hub > dao > agent
+    // 万法之资: 按优先级尝试截屏 — ghost > scrcpy > adb_hub > dao > sunlogin > agent
     var ghostSrc = _screenSources.get("ghost");
     var daoSrc = _screenSources.get("dao");
     var adbSrc = _screenSources.get("adb_hub");
+    var sunSrc = _screenSources.get("sunlogin");
     if (
       mode === "ghost" ||
       (mode === "auto" && ghostSrc && ghostSrc.status === "online")
@@ -1572,6 +2284,13 @@ const server = http.createServer(function (req, res) {
     ) {
       // dao-remote: GET /capture → JPEG image
       proxyToScreen(req, res, daoSrc.url + "/capture");
+    } else if (mode === "sunlogin") {
+      // 向日葵 v15 无本地流式 API — 作为启动器通过 /tools/launch 调用
+      jsonReply(res, {
+        ok: false,
+        error: "sunlogin 为 P2P 启动器, 无本地流源",
+        hint: "POST /tools/launch?id=sunlogin 启动主控界面",
+      });
     } else if (mode === "agent" || mode === "auto") {
       captureScreenViaAgent(hostname)
         .then(function (r) {
@@ -1594,8 +2313,8 @@ const server = http.createServer(function (req, res) {
   if (url.pathname === "/screen/stream") {
     var src = getBestScreenSource();
     if (src && src.name === "ghost") {
-      // ghost_shell: WebSocket /stream, 但HTTP请求代理/capture
-      proxyToScreen(req, res, src.url + "/capture");
+      // 道法自然: ghost_shell支持MJPEG实时流, 直接代理
+      proxyToScreen(req, res, src.url + "/stream/mjpeg");
     } else if (src && src.name === "dao") {
       proxyToScreen(req, res, src.url + "/capture");
     } else if (src && src.name === "mjpeg") {
@@ -1668,12 +2387,129 @@ const server = http.createServer(function (req, res) {
     }
     return;
   }
+  // 向日葵: 分类正确 — 启动器, 非流源. v15 无本地 HTTP API.
+  if (url.pathname.startsWith("/screen/sunlogin/")) {
+    jsonReply(
+      res,
+      {
+        ok: false,
+        error: "sunlogin 为 P2P 启动器, 无本地流式 API",
+        hint: "POST /tools/launch?id=sunlogin 启动主控界面",
+      },
+      404,
+    );
+    return;
+  }
+  // ═══ 万法之资: 向日葵全功能API — /sunlogin/* ═══
+  if (url.pathname.startsWith("/sunlogin")) {
+    // /sunlogin/status — 向日葵完整状态 (设备+进程+能力+功能)
+    if (url.pathname === "/sunlogin/status" || url.pathname === "/sunlogin") {
+      var slStatus = _sunloginBridge.getFullStatus();
+      jsonReply(res, slStatus);
+      return;
+    }
+    // /sunlogin/device — 本设备信息
+    if (url.pathname === "/sunlogin/device") {
+      jsonReply(res, {
+        ok: true,
+        device: _sunloginBridge.deviceInfo,
+      });
+      return;
+    }
+    // /sunlogin/plugins — 插件列表
+    if (url.pathname === "/sunlogin/plugins") {
+      jsonReply(res, {
+        ok: true,
+        capabilities: _sunloginBridge.capabilities,
+      });
+      return;
+    }
+    // /sunlogin/process — 进程状态 (实时刷新)
+    if (url.pathname === "/sunlogin/process") {
+      jsonReply(res, {
+        ok: true,
+        process: _sunloginBridge.refreshProcess(),
+      });
+      return;
+    }
+    // /sunlogin/devices — 云端设备列表 (调用Oray API)
+    if (url.pathname === "/sunlogin/devices") {
+      _sunloginBridge
+        .fetchDevices()
+        .then(function (r) {
+          jsonReply(res, { ok: true, result: r });
+        })
+        .catch(function (e) {
+          jsonReply(res, { ok: false, error: e.message });
+        });
+      return;
+    }
+    // /sunlogin/launch — 启动向日葵功能
+    if (url.pathname === "/sunlogin/launch") {
+      if (req.method === "POST") {
+        readBody(req, function (body) {
+          try {
+            var params = JSON.parse(body);
+            var result = _sunloginBridge.launch(
+              params.action || "open",
+              params,
+            );
+            jsonReply(res, result);
+          } catch (e) {
+            jsonReply(res, { ok: false, error: e.message });
+          }
+        });
+      } else {
+        var action = url.searchParams.get("action") || "open";
+        var result = _sunloginBridge.launch(action, {
+          deviceId: url.searchParams.get("id"),
+        });
+        jsonReply(res, result);
+      }
+      return;
+    }
+    // /sunlogin/config — 配置摘要 (不含敏感信息)
+    if (url.pathname === "/sunlogin/config") {
+      var cfg = _sunloginBridge.config || {};
+      jsonReply(res, {
+        ok: true,
+        desktop: cfg.desktop || {},
+        security: {
+          useCustomPassword: (cfg.security || {}).usecustompassword === "1",
+          useWindowsUser: (cfg.security || {}).usewindowuser === "1",
+        },
+        forward: {
+          channels: (_sunloginBridge.deviceInfo || {}).portForwarding || [],
+        },
+      });
+      return;
+    }
+    // 未知路由
+    jsonReply(
+      res,
+      {
+        ok: false,
+        error: "unknown sunlogin endpoint",
+        endpoints: [
+          "/sunlogin/status",
+          "/sunlogin/device",
+          "/sunlogin/plugins",
+          "/sunlogin/process",
+          "/sunlogin/devices",
+          "/sunlogin/launch",
+          "/sunlogin/config",
+        ],
+      },
+      404,
+    );
+    return;
+  }
   // ── /api/health — 道生一: Hub自身健康探针 ──
   if (req.method === "GET" && url.pathname === "/api/health") {
     jsonReply(res, {
       ok: true,
       service: "dao-remote-hub",
-      version: "7.0",
+      version: "8.0",
       uptime: process.uptime(),
       agents: agentSockets.size,
       sense: senseData.connected,
@@ -1778,6 +2614,17 @@ const server = http.createServer(function (req, res) {
     req.method === "GET" &&
     (url.pathname === "/" || url.pathname === "/sense")
   ) {
+    // 安全补缺: 远程访问 / 或 /sense 必须带令牌, 否则导向 /c 引导配对
+    //   本机 127.0.0.1/::1 天然免鉴权 (checkToken 内建豁免)
+    //   若远程无 token: 不返回含 MASTER_TOKEN 的页面 (防泄露), 而是重定向到配对页
+    if (!checkToken(req)) {
+      res.writeHead(302, {
+        Location: "/c",
+        "Cache-Control": "no-store",
+      });
+      res.end();
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(getSensePage(req));
     return;
@@ -2569,16 +3416,21 @@ function start(port, _retryCount) {
     }
   });
   server.listen(port, "0.0.0.0", function () {
+    // 道法自然: 实际绑定端口回写回模块 — EADDRINUSE 重试后配对/发现端点能拿到正确值
+    _listenPort = port;
     var proto = httpProto();
     var tokenQ = MASTER_TOKEN ? "?token=" + MASTER_TOKEN : "";
     var lanIPs = getAllLanIPs();
     console.log("\n===== 道 · 远程中枢 [Ed25519端到端] v8.0 =====");
     if (_daoFingerprint) console.log("身份:  " + _daoFingerprint);
-    console.log("五感:  http://localhost:" + port);
-    console.log(
-      "Agent: irm " + proto + "://" + _publicUrl + "/go" + tokenQ + " | iex",
-    );
-    var shownHost = _publicUrl.replace(/:.*/, "");
+    var primaryHost = lanIPs[0] || "127.0.0.1";
+    console.log("五感:  http://" + primaryHost + ":" + port);
+    if (_publicUrl) {
+      console.log(
+        "Agent: irm " + proto + "://" + _publicUrl + "/go" + tokenQ + " | iex",
+      );
+    }
+    var shownHost = (_publicUrl || "").replace(/:.*/, "");
     for (var li = 0; li < lanIPs.length; li++) {
       if (lanIPs[li] !== shownHost) {
         console.log(
@@ -2592,12 +3444,25 @@ function start(port, _retryCount) {
         );
       }
     }
-    console.log("大脑:  http://localhost:" + port + "/brain/state");
-    console.log("状态:  http://localhost:" + port + "/status");
-    console.log("Relay: http://localhost:" + port + "/relay/");
-    console.log("外网:  " + proto + "://" + _publicUrl);
+    console.log("大脑:  http://" + primaryHost + ":" + port + "/brain/state");
+    console.log("状态:  http://" + primaryHost + ":" + port + "/status");
+    console.log("配对:  http://" + primaryHost + ":" + port + "/pair (QR)");
+    console.log("发现:  http://" + primaryHost + ":" + port + "/dao/discover");
+    console.log("Relay: http://" + primaryHost + ":" + port + "/relay/");
+    if (_publicUrl) console.log("外网:  " + proto + "://" + _publicUrl);
     if (_daoBestInput) console.log("输入:  " + _daoBestInput);
     if (_daoBestCodec) console.log("编码:  " + _daoBestCodec);
+    if (_remoteTools.length > 0) {
+      console.log(
+        "工具:  " +
+          _remoteTools
+            .map(function (t) {
+              return t.name + (t.running ? "(运行中)" : "");
+            })
+            .join(", "),
+      );
+    }
+    console.log("工具:  http://" + primaryHost + ":" + port + "/tools");
     console.log("道法:  软编码一切 · URL请求自知 · 唯变所适");
     console.log("=============================================\n");
     bridge.findRelay().then(function (url) {

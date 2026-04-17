@@ -230,6 +230,21 @@ class DaoIdentity {
     }
     return null;
   }
+
+  // 道法自然 · 服务令牌确定性派生
+  // 同一身份 + 同一服务名 → 同一 token, 跨重启稳定, 跨进程可重算
+  // Ed25519 是 RFC 8032 deterministic signing, sign(const) 唯一. 不需文件缓存, 不需字面量后备.
+  // len: 令牌 hex 长度 (默认 32 字符 = 128 bits 熵)
+  // domain: 额外域分离字符串 (防止相同 service 在不同协议中共用 token)
+  serviceToken(service, len, domain) {
+    if (!service) throw new Error("identity.serviceToken: service required");
+    len = len || 32;
+    domain = domain || "v1";
+    var label = Buffer.from("dao/" + domain + "/" + service);
+    var sig = this._signer.sign(label);
+    // 截取前 N hex 字符 — Ed25519 签名 64 字节, 前半足够高熵
+    return sig.toString("hex").slice(0, len);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -243,16 +258,19 @@ class DaoDiscovery {
     this.tunnels = [];
     this.adbPath = "";
     this.adbDevices = [];
+    this.remoteTools = [];
   }
 
   probeAll() {
     this._probeNetwork();
     this._probeTunnels();
     this._probeAdb();
+    this._probeRemoteTools();
     return {
       network: { ips: this.localIPs, hostname: this.hostname },
       tunnels: this.tunnels,
       adb: { path: this.adbPath, devices: this.adbDevices },
+      remoteTools: this.remoteTools,
     };
   }
 
@@ -390,6 +408,180 @@ class DaoDiscovery {
         }
       } catch (e) {}
     }
+  }
+
+  // ── 万法之资: 扫描一切已知远程投屏工具 — 有则用, 无则过 ──
+  _probeRemoteTools() {
+    this.remoteTools = [];
+    if (!IS_WIN) return;
+    // 道法自然: tasklist获取进程名 + PowerShell获取路径 — 兼容一切Windows版本
+    var taskOut = _sh("tasklist /FO CSV /NH 2>nul", 5000);
+    var procs = new Set();
+    if (taskOut) {
+      taskOut.split("\n").forEach(function (line) {
+        var m = line.match(/^"([^"]+)"/);
+        if (m) procs.add(m[1].toLowerCase());
+      });
+    }
+    // 万法归宗: 一次PowerShell获取全部进程路径 — 适配wmic已移除的新版Windows
+    // 用 EncodedCommand 绕过 cmd.exe 转义地狱 — $_ 不再被吞
+    var procPaths = new Map(); // exe名(小写) → 完整路径
+    var psScript =
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Get-Process|Where-Object{$_.Path}|ForEach-Object{$_.Name.ToLower()+'|'+$_.Path}|Sort-Object -Unique";
+    var psEncoded = Buffer.from(psScript, "utf16le").toString("base64");
+    var psOut = _sh(
+      "powershell -NoProfile -EncodedCommand " + psEncoded,
+      10000,
+    );
+    if (psOut) {
+      psOut.split("\n").forEach(function (line) {
+        var sep = line.indexOf("|");
+        if (sep > 0) {
+          var name = line.substring(0, sep).trim().toLowerCase();
+          var p = line.substring(sep + 1).trim();
+          if (name && p && !procPaths.has(name)) procPaths.set(name, p);
+        }
+      });
+    }
+    var PF = process.env["ProgramFiles"] || "C:\\Program Files";
+    var PF86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+    var LA = process.env.LOCALAPPDATA || "";
+    var AD = process.env.APPDATA || "";
+    var TOOLS = [
+      {
+        id: "sunlogin",
+        name: "向日葵",
+        exe: ["SunLoginClient.exe"],
+        port: 13333,
+        api: true,
+        dirs: [
+          path.join(PF, "Oray", "SunLogin", "SunloginClient"),
+          path.join(PF86, "Oray", "SunLogin", "SunloginClient"),
+        ],
+      },
+      {
+        id: "wujie",
+        name: "无界趣连",
+        exe: ["ldremote.exe", "WJRemote.exe", "wujie.exe", "QuConnect.exe"],
+        port: 0,
+        api: false,
+        dirs: [
+          "D:\\leidian\\remote",
+          "C:\\leidian\\remote",
+          path.join(LA, "leidian", "remote"),
+          path.join(LA, "Programs", "wujie"),
+          path.join(PF, "WuJie"),
+        ],
+      },
+      {
+        id: "todesk",
+        name: "ToDesk",
+        exe: ["ToDesk.exe", "ToDesk_Service.exe"],
+        port: 0,
+        api: false,
+        dirs: [path.join(PF, "ToDesk"), path.join(PF86, "ToDesk")],
+      },
+      {
+        id: "anydesk",
+        name: "AnyDesk",
+        exe: ["AnyDesk.exe"],
+        port: 7070,
+        api: false,
+        dirs: [
+          path.join(PF86, "AnyDesk"),
+          path.join(PF, "AnyDesk"),
+          path.join(AD, "AnyDesk"),
+        ],
+      },
+      {
+        id: "rustdesk",
+        name: "RustDesk",
+        exe: ["rustdesk.exe"],
+        port: 21116,
+        api: false,
+        dirs: [path.join(PF, "RustDesk")],
+      },
+      {
+        id: "teamviewer",
+        name: "TeamViewer",
+        exe: ["TeamViewer.exe"],
+        port: 0,
+        api: false,
+        dirs: [path.join(PF, "TeamViewer"), path.join(PF86, "TeamViewer")],
+      },
+      {
+        id: "parsec",
+        name: "Parsec",
+        exe: ["parsecd.exe"],
+        port: 0,
+        api: false,
+        dirs: [path.join(AD, "Parsec")],
+      },
+    ];
+    for (var t of TOOLS) {
+      var exePath = "";
+      for (var dir of t.dirs) {
+        if (!dir) continue;
+        for (var exe of t.exe) {
+          var c = path.join(dir, exe);
+          try {
+            if (fs.existsSync(c)) {
+              exePath = c;
+              break;
+            }
+          } catch (e) {}
+        }
+        if (exePath) break;
+      }
+      if (!exePath) {
+        for (var exe of t.exe) {
+          var w = _sh("where " + exe + " 2>nul", 2000);
+          if (w) {
+            exePath = w.split("\n")[0].trim();
+            break;
+          }
+        }
+      }
+      // 万法归宗: 若静态扫描皆未中, 从运行中进程取路径 — 适配一切安装位置
+      if (!exePath) {
+        for (var exe of t.exe) {
+          // PowerShell $_.Name 不含 .exe 后缀, 需去除再匹配
+          var baseName = exe.toLowerCase().replace(/\.exe$/, "");
+          var pp = procPaths.get(baseName);
+          if (pp) {
+            exePath = pp;
+            break;
+          }
+        }
+      }
+      var running = false;
+      for (var exe of t.exe) {
+        if (procs.has(exe.toLowerCase())) {
+          running = true;
+          break;
+        }
+      }
+      if (exePath || running) {
+        this.remoteTools.push({
+          id: t.id,
+          name: t.name,
+          path: exePath,
+          running: running,
+          port: t.port,
+          api: t.api,
+        });
+      }
+    }
+    _log(
+      "[两仪] 远程工具: " +
+        (this.remoteTools.length > 0
+          ? this.remoteTools
+              .map(function (t) {
+                return t.name + (t.running ? "(运行中)" : "");
+              })
+              .join(", ")
+          : "无"),
+    );
   }
 
   findBinary(names, searchDirs) {

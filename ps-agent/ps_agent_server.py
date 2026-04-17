@@ -88,6 +88,8 @@ class AgentInfo:
         self.pending_files = {} # cmd_id -> file bytes (for upload)
         self.screenshots = {}   # cmd_id -> base64 png
         self.lock = threading.Lock()
+        # 道法自然: 事件驱动的 poll 唤醒, 取代 0.5s 轮询, 命令入队即刻送达
+        self.wake_event = threading.Event()
 
     @property
     def is_alive(self):
@@ -152,9 +154,13 @@ def register_agent(sysinfo):
             existing.sysinfo = sysinfo
             existing.connected_at = time.time()
             existing.last_heartbeat = time.time()
-            with existing.lock:
-                existing.command_queue.clear()
-            print(f"[RECONNECT] {agent_id} from {sysinfo.get('public_ip', sysinfo.get('local_ip', '?'))}")
+            # 锚定本源: 重连时 **不清空** command_queue.
+            # 场景: AI 端 exec-sync 入队 → laptop 网络抖动 → 短暂重注册 →
+            # 旧实现清空队列导致命令永久丢失 (exec-sync 10s 后 408).
+            # 保留队列, 让 laptop 重新 poll 时照常取走.
+            # 唤醒现有等待的 poll, 让其感知 token 已更新 (会返回 None → 客户端重注册).
+            existing.wake_event.set()
+            print(f"[RECONNECT] {agent_id} from {sysinfo.get('public_ip', sysinfo.get('local_ip', '?'))} (queue preserved: {len(existing.command_queue)})")
             return existing
         agent = AgentInfo(agent_id, token, sysinfo)
         agents[agent_id] = agent
@@ -186,14 +192,24 @@ def queue_command(agent_id, cmd_type, payload):
     }
     with agent.lock:
         agent.command_queue.append(cmd)
+    # 道法自然: 入队即刻唤醒正在等待的 long-poll, 消除 0-500ms 延迟
+    agent.wake_event.set()
     return cmd_id, None
 
 def poll_commands(agent_id, token, timeout=POLL_TIMEOUT):
-    """Long-poll: wait for commands, return list of pending commands."""
+    """Long-poll: wait for commands, return list of pending commands.
+
+    事件驱动: 用 Event.wait(0.5) 代替 sleep(0.5).
+    - 有新命令时 queue_command 会 set event → 0ms 返回
+    - 无命令时每 0.5s 自动检查 (兜底, 防止 event 丢失)
+    - 最坏延迟仍为 500ms, 最好延迟从 250ms (旧: avg 0.5*0.5) 降到 ~0ms
+    """
     agent = get_agent(agent_id)
     if not agent or agent.token != token:
         return None
     agent.last_heartbeat = time.time()
+    # 进入 poll 时清掉之前残留的 event (避免立即假触发)
+    agent.wake_event.clear()
     deadline = time.time() + timeout
     while time.time() < deadline:
         with agent.lock:
@@ -201,7 +217,13 @@ def poll_commands(agent_id, token, timeout=POLL_TIMEOUT):
                 cmds = list(agent.command_queue)
                 agent.command_queue.clear()
                 return cmds
-        time.sleep(0.5)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        # wait 最多 0.5s 或剩余时间, 命令入队时 wake_event.set() 会立刻唤醒
+        woke = agent.wake_event.wait(timeout=min(0.5, remaining))
+        if woke:
+            agent.wake_event.clear()
     return []  # empty = no commands, agent should re-poll
 
 def submit_result(agent_id, token, cmd_id, result_data):

@@ -116,6 +116,11 @@ var _screenReg = new ScreenRegistry();
 // _screenSources 是注册表状态的别名视图 — 所有 .get/.has/.forEach 消费者零改动
 var _screenSources = _screenReg.state;
 var _screenClients = new Set();
+// WebRTC signaling relay — offerer (browser) ↔ answerer (screen source)
+var _rtcOfferers = new Set();
+var _rtcAnswerers = new Set();
+// REST fallback postbox for SDP/ICE exchange (environments where WS is blocked)
+var _rtcPostBox = { offer: [], answer: [] };
 // 万法之资: 远程工具注册表 — 道核发现的一切可用投屏/远程工具
 var _remoteTools = JSON.parse(process.env.DAO_REMOTE_TOOLS || "[]");
 
@@ -1721,6 +1726,224 @@ const server = http.createServer(function (req, res) {
     res.end(getUnifiedAgentScript(req));
     return;
   }
+  // ── 道 · /dao/rtc — WebRTC REST fallback (WS 不可用时)
+  //    POST /dao/rtc  { type:"offer"|"answer"|"ice-candidate", sdp/candidate }
+  //    将 SDP/ICE 缓存, 对端 GET /dao/rtc?role=answer|offer 取走
+  if (url.pathname === "/dao/rtc") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (req.method === "POST") {
+      readBody(req, function (body) {
+        try {
+          var msg = JSON.parse(body);
+          if (!msg.type) {
+            res.writeHead(400);
+            res.end("missing type");
+            return;
+          }
+          if (msg.type === "offer" || msg.type === "ice-candidate") {
+            if (!_rtcPostBox.answer) _rtcPostBox.answer = [];
+            _rtcPostBox.answer.push(msg);
+            if (_rtcPostBox.answer.length > 20) _rtcPostBox.answer.shift();
+          } else {
+            if (!_rtcPostBox.offer) _rtcPostBox.offer = [];
+            _rtcPostBox.offer.push(msg);
+            if (_rtcPostBox.offer.length > 20) _rtcPostBox.offer.shift();
+          }
+          jsonReply(res, { ok: true });
+        } catch (e) {
+          res.writeHead(400);
+          res.end("bad json");
+        }
+      });
+      return;
+    }
+    if (req.method === "GET") {
+      var forRole = url.searchParams.get("role") || "offer";
+      var msgs = _rtcPostBox[forRole] || [];
+      _rtcPostBox[forRole] = [];
+      jsonReply(res, { messages: msgs });
+      return;
+    }
+    res.writeHead(405);
+    res.end("POST or GET only");
+    return;
+  }
+  // ── 道 · /files — 文件传输 (RustDesk/MeshCentral 均有此功能)
+  //    GET  /files?path=C:/Users  → 列目录
+  //    GET  /files/get?path=...   → 下载文件
+  //    POST /files/put?path=...   → 上传文件 (body = raw file content)
+  if (url.pathname === "/files" && req.method === "GET") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    var targetPath =
+      url.searchParams.get("path") ||
+      (process.platform === "win32" ? "C:\\" : "/");
+    var fs = require("fs");
+    try {
+      var entries = fs.readdirSync(targetPath, { withFileTypes: true });
+      var result = entries.slice(0, 200).map(function (e) {
+        var stat = null;
+        try {
+          stat = fs.statSync(require("path").join(targetPath, e.name));
+        } catch (x) {}
+        return {
+          name: e.name,
+          type: e.isDirectory() ? "dir" : "file",
+          size: stat ? stat.size : 0,
+          mtime: stat ? stat.mtimeMs : 0,
+        };
+      });
+      jsonReply(res, { path: targetPath, entries: result });
+    } catch (e) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+  if (url.pathname === "/files/get" && req.method === "GET") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    var filePath = url.searchParams.get("path");
+    if (!filePath) {
+      res.writeHead(400);
+      res.end("missing path");
+      return;
+    }
+    var fs = require("fs");
+    try {
+      var stat = fs.statSync(filePath);
+      if (stat.isDirectory()) {
+        res.writeHead(400);
+        res.end("is directory");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition":
+          'attachment; filename="' + require("path").basename(filePath) + '"',
+        "Content-Length": stat.size,
+      });
+      fs.createReadStream(filePath).pipe(res);
+    } catch (e) {
+      res.writeHead(404);
+      res.end(e.message);
+    }
+    return;
+  }
+  if (url.pathname === "/files/put" && req.method === "POST") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    var destPath = url.searchParams.get("path");
+    if (!destPath) {
+      res.writeHead(400);
+      res.end("missing path");
+      return;
+    }
+    var fs = require("fs");
+    try {
+      var dir = require("path").dirname(destPath);
+      fs.mkdirSync(dir, { recursive: true });
+      var ws = fs.createWriteStream(destPath);
+      req.pipe(ws);
+      ws.on("finish", function () {
+        jsonReply(res, { ok: true, path: destPath });
+      });
+      ws.on("error", function (e) {
+        res.writeHead(500);
+        res.end(e.message);
+      });
+    } catch (e) {
+      res.writeHead(500);
+      res.end(e.message);
+    }
+    return;
+  }
+  // ── 道 · /dao/clipboard — 剪贴板同步 (RustDesk/MeshCentral 标配)
+  //    GET  /dao/clipboard       → 读取远程剪贴板
+  //    POST /dao/clipboard       → 写入远程剪贴板 { text: "..." }
+  if (url.pathname === "/dao/clipboard") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (req.method === "GET") {
+      var clipCmd =
+        process.platform === "win32"
+          ? 'powershell -NoProfile -Command "Get-Clipboard -Raw"'
+          : process.platform === "darwin"
+            ? "pbpaste"
+            : "xclip -selection clipboard -o";
+      require("child_process").exec(
+        clipCmd,
+        { timeout: 5000, encoding: "utf-8" },
+        function (err, stdout) {
+          if (err) {
+            jsonReply(res, { text: "", error: err.message });
+            return;
+          }
+          jsonReply(res, { text: stdout || "" });
+        },
+      );
+      return;
+    }
+    if (req.method === "POST") {
+      readBody(req, function (body) {
+        try {
+          var msg = JSON.parse(body);
+          var text = msg.text || "";
+          if (process.platform === "win32") {
+            var cp = require("child_process");
+            var p = cp.spawn(
+              "powershell",
+              ["-NoProfile", "-Command", "Set-Clipboard -Value $input"],
+              { stdio: ["pipe", "ignore", "ignore"] },
+            );
+            p.stdin.end(text);
+            p.on("close", function () {
+              jsonReply(res, { ok: true });
+            });
+            p.on("error", function (e) {
+              jsonReply(res, { ok: false, error: e.message });
+            });
+          } else if (process.platform === "darwin") {
+            var cp = require("child_process");
+            var p = cp.spawn("pbcopy", [], {
+              stdio: ["pipe", "ignore", "ignore"],
+            });
+            p.stdin.end(text);
+            p.on("close", function () {
+              jsonReply(res, { ok: true });
+            });
+          } else {
+            var cp = require("child_process");
+            var p = cp.spawn("xclip", ["-selection", "clipboard"], {
+              stdio: ["pipe", "ignore", "ignore"],
+            });
+            p.stdin.end(text);
+            p.on("close", function () {
+              jsonReply(res, { ok: true });
+            });
+          }
+        } catch (e) {
+          res.writeHead(400);
+          res.end("bad json");
+        }
+      });
+      return;
+    }
+    res.writeHead(405);
+    res.end("GET or POST only");
+    return;
+  }
   // ── 道 · /dao/discover — 五感之根: 身份 + LAN IP + 端口 + NAT 状态
   //    零 token 权限: 仅返回公开信息 (fingerprint/ips/port/publicUrl)
   //    供客户端从鉴旧 URL 即时知晓 hub 实际身份, 避免酵健廢教 URL
@@ -3230,6 +3453,67 @@ wss.on("connection", function (ws, req) {
     return;
   }
 
+  // ---- WebRTC Signaling (P2P upgrade) ---- 柔弱胜刚强: WS relay → WebRTC 直连
+  // 仿 MeshCentral 架构: 先建 WS 通道, 交换 SDP/ICE, 成功后浏览器↔源 P2P 直连
+  // 失败则 WS 通道继续工作 (优雅退化, 不如 RustDesk 的 Rust relay 快, 但零依赖)
+  if (path.startsWith("/ws/rtc")) {
+    if (!checkToken(req)) {
+      ws.close(4001, "unauthorized");
+      return;
+    }
+    // 从 query 取 role: "offer" (browser) 或 "answer" (screen source / ghost_shell)
+    var rtcRole = "offer";
+    try {
+      var rtcUrl = new URL(req.url, "http://localhost");
+      rtcRole = rtcUrl.searchParams.get("role") || "offer";
+    } catch (e) {}
+    console.log(
+      "[rtc] " + rtcRole + " connected from " + req.socket.remoteAddress,
+    );
+
+    if (rtcRole === "answer") {
+      // Screen source (ghost_shell / Android) 注册为 answerer
+      _rtcAnswerers.add(ws);
+      ws.on("close", function () {
+        _rtcAnswerers.delete(ws);
+        console.log(
+          "[rtc] answerer disconnected [" + _rtcAnswerers.size + " remaining]",
+        );
+      });
+    } else {
+      // Browser 注册为 offerer
+      _rtcOfferers.add(ws);
+      ws.on("close", function () {
+        _rtcOfferers.delete(ws);
+        console.log(
+          "[rtc] offerer disconnected [" + _rtcOfferers.size + " remaining]",
+        );
+      });
+    }
+
+    ws.on("message", function (data) {
+      try {
+        var msg = JSON.parse(data);
+        // 转发 SDP offer/answer 和 ICE candidates
+        if (msg.type === "offer" || msg.type === "ice-candidate") {
+          // browser → all answerers (screen sources)
+          _rtcAnswerers.forEach(function (a) {
+            if (a.readyState === 1 && a !== ws) a.send(data.toString());
+          });
+        } else if (
+          msg.type === "answer" ||
+          msg.type === "ice-candidate-answer"
+        ) {
+          // screen source → all offerers (browsers)
+          _rtcOfferers.forEach(function (o) {
+            if (o.readyState === 1 && o !== ws) o.send(data.toString());
+          });
+        }
+      } catch (e) {}
+    });
+    return;
+  }
+
   // ---- AGENT (PowerShell) ---- 安全通道 + 多Agent
   if (path.startsWith("/ws/agent")) {
     if (!checkToken(req)) {
@@ -3463,6 +3747,11 @@ function start(port, _retryCount) {
       );
     }
     console.log("工具:  http://" + primaryHost + ":" + port + "/tools");
+    console.log("文件:  http://" + primaryHost + ":" + port + "/files");
+    console.log(
+      "剪贴板: http://" + primaryHost + ":" + port + "/dao/clipboard",
+    );
+    console.log("WebRTC: ws://" + primaryHost + ":" + port + "/ws/rtc");
     console.log("道法:  软编码一切 · URL请求自知 · 唯变所适");
     console.log("=============================================\n");
     bridge.findRelay().then(function (url) {

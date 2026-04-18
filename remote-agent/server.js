@@ -9,6 +9,8 @@ const { ScreenRegistry } = require("./dao_screen_registry");
 const daoPair = require("./dao_pair");
 const daoWol = require("./dao_wol");
 const { DaoMdnsBrowser } = require("./dao_mdns");
+const { DaoRecorder } = require("./dao_recorder");
+const path = require("path");
 
 // 万法之资: 向日葵深度集成 — config解析 + 云API + 全功能调用
 var _sunloginBridge = new SunloginBridge();
@@ -925,6 +927,91 @@ if (process.env.DAO_NO_MDNS_BROWSE !== "1") {
   } catch (e) {
     console.log("[mdns-browser] 启动失败: " + e.message);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 会话录制器 — 万物刍狗, 皆可回溯
+// 道法自然: 从最佳投屏源采样 JPEG 帧, 磁盘存 frames/*.jpg + meta.json
+// 回放: multipart/x-mixed-replace MJPEG 流, 浏览器 <img> 直接播
+// 可禁用: DAO_NO_RECORDER=1
+// ═══════════════════════════════════════════════════════════════════
+var _recorder = null;
+if (process.env.DAO_NO_RECORDER !== "1") {
+  try {
+    var _recDir =
+      process.env.DAO_RECORD_DIR ||
+      path.join(os.homedir(), ".dao-remote", "recordings");
+    _recorder = new DaoRecorder({
+      recordDir: _recDir,
+      captureFn: _captureJpegBuffer, // 定义于下
+      log: function (m) {
+        console.log("[recorder] " + m);
+      },
+    });
+    console.log("[recorder] 就绪 · 存储: " + _recDir);
+  } catch (e) {
+    console.log("[recorder] 启动失败: " + e.message);
+  }
+}
+
+// 道 · 给录制器用的原始 JPEG Buffer 抓取 — 覆盖全部源
+function _captureJpegBuffer() {
+  return new Promise(function (resolve, reject) {
+    var best = _screenReg.best();
+    if (!best) {
+      reject(new Error("no screen source online"));
+      return;
+    }
+    // 各源都挂 /capture (ghost/dao/mjpeg) 或自定路径 (adb_hub)
+    var capUrl;
+    if (best.id === "ghost" || best.id === "dao" || best.id === "mjpeg") {
+      capUrl = best.url + "/capture";
+    } else if (best.id === "adb_hub") {
+      capUrl = best.url + "/api/adb/screencap?token=" + ADB_HUB_TOKEN;
+    } else {
+      // mdns 动态源: 用 healthPath 或 /capture 兜底
+      capUrl = best.url + (best.healthPath || "/capture");
+    }
+    var req = http.get(capUrl, { timeout: 10000 }, function (res) {
+      if (res.statusCode >= 400) {
+        res.resume();
+        reject(new Error("capture http " + res.statusCode));
+        return;
+      }
+      var ct = (res.headers["content-type"] || "").toLowerCase();
+      var chunks = [];
+      res.on("data", function (c) {
+        chunks.push(c);
+      });
+      res.on("end", function () {
+        var buf = Buffer.concat(chunks);
+        // 若返回 JSON (image: data:image/jpeg;base64,xxx), 解出原始 bytes
+        if (ct.indexOf("json") !== -1) {
+          try {
+            var j = JSON.parse(buf.toString("utf8"));
+            var img = j.image || j.screenshot || "";
+            var m = /^data:image\/(jpeg|png);base64,(.+)$/i.exec(img);
+            if (m) {
+              resolve(Buffer.from(m[2], "base64"));
+              return;
+            }
+            reject(new Error("json capture has no image"));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          resolve(buf);
+        }
+      });
+    });
+    req.on("error", function (e) {
+      reject(e);
+    });
+    req.on("timeout", function () {
+      req.destroy();
+      reject(new Error("capture timeout"));
+    });
+  });
 }
 
 // ==================== ADB兜底: 万法之资 — 无服务也能控 ====================
@@ -2175,6 +2262,127 @@ const server = http.createServer(function (req, res) {
     } catch (e) {
       jsonReply(res, { ok: false, error: e.message }, 500);
     }
+    return;
+  }
+  // ── 道 · /dao/record — 会话录制 (MeshCentral audit-trail parity)
+  //    GET    /dao/record                   → { enabled, sessions: [...] }
+  //    POST   /dao/record?fps=1&max=3600    → 开启新会话, 返回 {id, meta}
+  //    DELETE /dao/record?id=xxx            → 删除录制
+  //    POST   /dao/record/stop?id=xxx       → 停止指定会话
+  //    GET    /dao/record/play?id=xxx&speed=1&loop=0  → multipart MJPEG 回放
+  //    GET    /dao/record/thumb?id=xxx      → 中间帧缩略图 (JPEG)
+  if (url.pathname === "/dao/record") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (!_recorder) {
+      jsonReply(res, { ok: false, error: "recorder disabled" }, 503);
+      return;
+    }
+    if (req.method === "GET") {
+      jsonReply(res, {
+        ok: true,
+        enabled: true,
+        sessions: _recorder.list(),
+      });
+      return;
+    }
+    if (req.method === "POST") {
+      var fps = Number(url.searchParams.get("fps")) || 1;
+      var maxDur = Number(url.searchParams.get("max")) || 3600;
+      var source = url.searchParams.get("source") || "auto";
+      try {
+        var r = _recorder.start({
+          fps: fps,
+          maxDurationSec: maxDur,
+          source: source,
+        });
+        jsonReply(res, { ok: true, id: r.id, meta: r.meta });
+      } catch (e) {
+        jsonReply(res, { ok: false, error: e.message }, 500);
+      }
+      return;
+    }
+    if (req.method === "DELETE") {
+      var delId = url.searchParams.get("id") || "";
+      var ok = _recorder.delete(delId);
+      jsonReply(res, { ok: ok, id: delId });
+      return;
+    }
+    res.writeHead(405);
+    res.end("GET | POST | DELETE");
+    return;
+  }
+  if (url.pathname === "/dao/record/stop") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (!_recorder) {
+      jsonReply(res, { ok: false, error: "recorder disabled" }, 503);
+      return;
+    }
+    if (req.method !== "POST") {
+      res.writeHead(405);
+      res.end("POST only");
+      return;
+    }
+    var stopId = url.searchParams.get("id") || "";
+    var stopped = _recorder.stop(stopId);
+    if (!stopped) {
+      jsonReply(res, { ok: false, error: "unknown id" }, 404);
+      return;
+    }
+    jsonReply(res, { ok: true, meta: stopped });
+    return;
+  }
+  if (url.pathname === "/dao/record/play") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (!_recorder) {
+      jsonReply(res, { ok: false, error: "recorder disabled" }, 503);
+      return;
+    }
+    if (req.method !== "GET") {
+      res.writeHead(405);
+      res.end("GET only");
+      return;
+    }
+    var playId = url.searchParams.get("id") || "";
+    var speed = Number(url.searchParams.get("speed")) || 1;
+    var loop = url.searchParams.get("loop") === "1";
+    _recorder.stream(playId, res, { speed: speed, loop: loop });
+    return;
+  }
+  if (url.pathname === "/dao/record/thumb") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (!_recorder) {
+      jsonReply(res, { ok: false, error: "recorder disabled" }, 503);
+      return;
+    }
+    if (req.method !== "GET") {
+      res.writeHead(405);
+      res.end("GET only");
+      return;
+    }
+    var thumbId = url.searchParams.get("id") || "";
+    var img = _recorder.thumbnail(thumbId);
+    if (!img) {
+      jsonReply(res, { ok: false, error: "no frames" }, 404);
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": img.length,
+      "Cache-Control": "public, max-age=60",
+    });
+    res.end(img);
     return;
   }
   // ── 道 · /dao/discover — 五感之根: 身份 + LAN IP + 端口 + NAT 状态
@@ -3986,6 +4194,7 @@ function start(port, _retryCount) {
     );
     console.log("WoL:    http://" + primaryHost + ":" + port + "/dao/wol");
     console.log("mDNS:   http://" + primaryHost + ":" + port + "/dao/mdns");
+    console.log("录制:   http://" + primaryHost + ":" + port + "/dao/record");
     console.log("WebRTC: ws://" + primaryHost + ":" + port + "/ws/rtc");
     console.log("道法:  软编码一切 · URL请求自知 · 唯变所适");
     console.log("=============================================\n");

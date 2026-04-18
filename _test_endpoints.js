@@ -166,6 +166,44 @@ async function waitListen() {
       throw new Error("expected ok:true: " + r.raw);
   });
 
+  console.log("\n[IV.6] /dao/record");
+  await ok(
+    "GET /dao/record 返回 {enabled:true, sessions:[]}",
+    async function () {
+      var r = await req("GET", "/dao/record");
+      if (r.status !== 200) throw new Error("status " + r.status);
+      if (typeof r.body.enabled !== "boolean")
+        throw new Error("enabled not bool");
+      if (!Array.isArray(r.body.sessions))
+        throw new Error("sessions not array");
+    },
+  );
+  await ok("POST /dao/record?fps=2 创建会话返回 id", async function () {
+    var r = await req("POST", "/dao/record?fps=2&max=10&source=e2e");
+    if (r.status !== 200)
+      throw new Error("status " + r.status + " body=" + r.raw);
+    if (!r.body.ok) throw new Error("not ok: " + r.raw);
+    if (!r.body.id) throw new Error("no id");
+    if (r.body.meta.fps !== 2) throw new Error("fps not echo'd");
+    // 紧接着 stop, 避免拖着 setTimeout 继续抓 (无投屏源时 captureFn 会 reject)
+    var stopR = await req(
+      "POST",
+      "/dao/record/stop?id=" + encodeURIComponent(r.body.id),
+    );
+    if (stopR.status !== 200)
+      throw new Error("stop status " + stopR.status + " body=" + stopR.raw);
+    // 清理
+    var delR = await req(
+      "DELETE",
+      "/dao/record?id=" + encodeURIComponent(r.body.id),
+    );
+    if (delR.status !== 200) throw new Error("delete status " + delR.status);
+  });
+  await ok("GET /dao/record/thumb?id=no-such 返回 404", async function () {
+    var r = await req("GET", "/dao/record/thumb?id=no-such-id");
+    if (r.status !== 404) throw new Error("status " + r.status);
+  });
+
   console.log("\n[V] /sense (page render)");
   await ok("GET /sense 返回 HTML 含新标签", async function () {
     var r = await req("GET", "/sense");

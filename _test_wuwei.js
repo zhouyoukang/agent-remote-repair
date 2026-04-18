@@ -475,6 +475,127 @@ ok(
   },
 );
 
+console.log("\n[4f] dao_recorder \u00b7 \u4f1a\u8bdd\u5f55\u5236");
+const { DaoRecorder, _pad6, _MAX_FPS } = require("./remote-agent/dao_recorder");
+var _recTmpDir = path.join(os.tmpdir(), "dao-rec-" + Date.now());
+ok("_pad6 \u586b\u96f6", function () {
+  assert.strictEqual(_pad6(1), "000001");
+  assert.strictEqual(_pad6(42), "000042");
+  assert.strictEqual(_pad6(999999), "999999");
+});
+ok("API \u5b8c\u5907", function () {
+  var fs = require("fs");
+  fs.mkdirSync(_recTmpDir, { recursive: true });
+  var jpeg1x1 = Buffer.from(
+    "ffd8ffe000104a46494600010100000100010000ffdb00430001010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101ffc00011080001000101011100021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffd9",
+    "hex",
+  );
+  var r = new DaoRecorder({
+    recordDir: _recTmpDir,
+    captureFn: function () {
+      return Promise.resolve(jpeg1x1);
+    },
+    log: function () {},
+  });
+  assert.strictEqual(typeof r.start, "function");
+  assert.strictEqual(typeof r.stop, "function");
+  assert.strictEqual(typeof r.list, "function");
+  assert.strictEqual(typeof r.get, "function");
+  assert.strictEqual(typeof r.delete, "function");
+  assert.strictEqual(typeof r.stream, "function");
+  assert.strictEqual(typeof r.thumbnail, "function");
+  assert.deepStrictEqual(r.list(), []);
+});
+ok("fps \u4e0a\u4e0b\u9650 \u00b7 10fps \u5c01\u9876", function () {
+  assert.strictEqual(_MAX_FPS, 10);
+});
+ok(
+  "start \u2192 captureNow \u2192 stop \u2192 list \u2192 delete \u00b7 \u5168\u94fe\u8def (\u786e\u5b9a\u6027)",
+  async function () {
+    var jpeg1x1 = Buffer.from(
+      "ffd8ffe000104a46494600010100000100010000ffdb00430001010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101ffc00011080001000101011100021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffd9",
+      "hex",
+    );
+    var r = new DaoRecorder({
+      recordDir: _recTmpDir,
+      captureFn: function () {
+        return Promise.resolve(jpeg1x1);
+      },
+      log: function () {},
+    });
+    var s = r.start({ fps: 1, maxDurationSec: 60, source: "unit-test" });
+    assert.strictEqual(typeof s.id, "string");
+    assert.strictEqual(s.meta.status, "recording");
+    // 直接触发 3 帧 — 不依赖 setTimeout 时序, 对抗测试套件事件循环压力
+    var r1 = await r.captureNow(s.id);
+    assert.strictEqual(
+      r1.written,
+      true,
+      "frame 1 not written: " + JSON.stringify(r1),
+    );
+    var r2 = await r.captureNow(s.id);
+    assert.strictEqual(r2.written, true, "frame 2 not written");
+    var r3 = await r.captureNow(s.id);
+    assert.strictEqual(r3.written, true, "frame 3 not written");
+    var stopped = r.stop(s.id);
+    assert.ok(stopped, "stop returned null");
+    assert.strictEqual(stopped.status, "stopped");
+    assert.ok(
+      stopped.frames >= 3,
+      "expected >=3 frames, got: " + stopped.frames,
+    );
+    var list = r.list();
+    assert.ok(
+      list.some(function (m) {
+        return m.id === s.id;
+      }),
+      "session not listed",
+    );
+    var thumb = r.thumbnail(s.id);
+    assert.ok(Buffer.isBuffer(thumb), "thumbnail not buffer");
+    assert.ok(thumb.length > 0, "empty thumbnail");
+    assert.ok(r.delete(s.id), "delete failed");
+    assert.strictEqual(r.get(s.id), null, "still exists after delete");
+  },
+);
+ok(
+  "captureNow \u975e\u6d3b\u52a8\u4f1a\u8bdd \u8fd4 written:false",
+  async function () {
+    var r = new DaoRecorder({
+      recordDir: _recTmpDir,
+      captureFn: function () {
+        return Promise.resolve(Buffer.alloc(0));
+      },
+      log: function () {},
+    });
+    var res = await r.captureNow("no-such-id");
+    assert.strictEqual(res.written, false);
+    assert.ok(/not recording/i.test(res.error || ""));
+  },
+);
+ok("stop() \u672a\u77e5 id \u8fd4\u7a7a", function () {
+  var r = new DaoRecorder({
+    recordDir: _recTmpDir,
+    captureFn: function () {
+      return Promise.resolve(Buffer.alloc(0));
+    },
+    log: function () {},
+  });
+  assert.strictEqual(r.stop("no-such-id"), null);
+});
+ok("delete() \u9632\u8def\u5f84\u6ce8\u5165", function () {
+  var r = new DaoRecorder({
+    recordDir: _recTmpDir,
+    captureFn: function () {
+      return Promise.resolve(Buffer.alloc(0));
+    },
+    log: function () {},
+  });
+  assert.strictEqual(r.delete("../etc/passwd"), false);
+  assert.strictEqual(r.delete(""), false);
+  assert.strictEqual(r.get("../../"), null);
+});
+
 console.log("\n[5] createPairing \u4e0e kernel \u62fc\u6b63");
 ok("createPairing 返回 { uri, token, ips, ... }", function () {
   var kernel = new DaoKernel(tmpDir);
@@ -498,10 +619,11 @@ Promise.all(pending).then(function () {
       " =============\n",
   );
 
-  // 清理测试身份目录
+  // 清理测试身份目录 + 录制临时目录
   try {
     var fs = require("fs");
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(_recTmpDir, { recursive: true, force: true });
   } catch (e) {}
 
   process.exit(failCount === 0 ? 0 : 1);

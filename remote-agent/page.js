@@ -136,6 +136,9 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
     <button class="tab" onclick="go('term',this)">终端</button>
     <button class="tab" onclick="go('diag',this)">诊断</button>
     <button class="tab" onclick="go('sys',this)">系统</button>
+    <button class="tab" onclick="go('files',this)">文件</button>
+    <button class="tab" onclick="go('clip',this)">剪贴板</button>
+    <button class="tab" onclick="go('wake',this)">唤醒</button>
     <a href="/marble${TOKEN ? "?token=" + TOKEN : ""}" class="tab" style="text-decoration:none;color:inherit">3D世界</a>
   </div>
   <div id="p-home" class="page act">
@@ -227,6 +230,48 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
   </div>
   <div id="p-sys" class="page">
     <div id="sysBox"><div class="empty">等待 Agent 发送系统信息...</div></div>
+  </div>
+  <div id="p-files" class="page">
+    <div class="card">
+      <h3>文件浏览 · 上传下载</h3>
+      <div class="ti">
+        <input type="text" id="fPath" placeholder="${/win/i.test(process.platform) ? "C:\\\\" : "/"}" value="${/win/i.test(process.platform) ? "C:\\\\" : "/"}" onkeydown="if(event.key==='Enter')fList()">
+        <button onclick="fList()">列出</button>
+      </div>
+      <div class="scr-bar" style="margin-top:10px">
+        <button onclick="fUp()" title="上一层">⬆ 上级</button>
+        <button onclick="fDownload()" title="下载当前路径">⬇ 下载</button>
+        <label class="cbtn" style="cursor:pointer;display:inline-block;padding:6px 14px">📤 上传
+          <input type="file" id="fUpload" onchange="fUploadFile()" style="display:none">
+        </label>
+        <span class="scr-info" id="fInfo"></span>
+      </div>
+      <div id="fList" class="term" style="min-height:200px;max-height:60vh"><div class="empty">点击「列出」开始</div></div>
+    </div>
+  </div>
+  <div id="p-clip" class="page">
+    <div class="card">
+      <h3>剪贴板同步 · 两端互通</h3>
+      <div class="ti" style="margin-bottom:10px">
+        <button onclick="clipRead()" title="读取远程剪贴板">⬅ 读远程</button>
+        <button onclick="clipWrite()" title="写入远程剪贴板">➡ 写远程</button>
+        <span class="scr-info" id="clipInfo">空闲</span>
+      </div>
+      <textarea id="clipText" rows="8" placeholder="此处内容 · 点[写远程]同步到远程机 · 点[读远程]把远程剪贴板拉到此处"
+        style="width:100%;background:#0a0e14;border:1px solid #2a3050;border-radius:8px;padding:10px;color:#e0e0e0;font-family:'Cascadia Code',Consolas,monospace;font-size:12px;resize:vertical"></textarea>
+    </div>
+  </div>
+  <div id="p-wake" class="page">
+    <div class="card">
+      <h3>Wake-on-LAN · 吹气唤醒</h3>
+      <p>对目标网卡发魔法包，机器关机/休眠皆可从网络唤起。需目标机 BIOS 开启 WoL，网卡固件支持，且与本机同网段（或路由器放行 UDP 9）。</p>
+      <div id="wakeList" style="margin:12px 0"><div class="empty">加载已记录的 Agent MAC...</div></div>
+      <div class="ti">
+        <input type="text" id="wakeMac" placeholder="手动 MAC: AA:BB:CC:DD:EE:FF 或 AA-BB-...">
+        <button onclick="wakeCustom()">唤醒</button>
+      </div>
+      <div class="scr-info" id="wakeInfo" style="margin-top:8px">空闲</div>
+    </div>
   </div>
 </div>
 <script>
@@ -378,6 +423,164 @@ function go(id,btn){
   document.querySelectorAll('.page').forEach(function(p){p.className='page'});
   btn.className='tab act';
   document.getElementById('p-'+id).className='page act';
+  // 无为而无不为: 首次进入自动加载
+  if(id==='files'&&!window._fLoaded){window._fLoaded=true;fList();}
+  if(id==='clip'&&!window._clipLoaded){window._clipLoaded=true;clipRead();}
+  if(id==='wake'){wakeLoad();}
+}
+// ═══════ 文件传输 (v8.2 backend · v8.3 UI) ═══════
+var TK=${TOKEN ? '"' + TOKEN + '"' : '""'};
+function fJoinPath(base,name){
+  base=base||'';
+  if(!base) return name;
+  var sep=base.indexOf('\\\\')>=0||/^[A-Za-z]:/.test(base)?'\\\\':'/';
+  if(base.slice(-1)===sep)return base+name;
+  return base+sep+name;
+}
+function fParent(p){
+  if(!p)return p;
+  var m=p.match(/^[A-Za-z]:[\\\\\\/]?$/);if(m)return p;
+  p=p.replace(/[\\\\\\/]$/,'');
+  var i=Math.max(p.lastIndexOf('\\\\'),p.lastIndexOf('/'));
+  if(i<=0)return p;
+  var parent=p.substring(0,i);
+  if(/^[A-Za-z]:$/.test(parent))parent=parent+'\\\\';
+  return parent||'/';
+}
+function fUrl(extra){
+  var q=(TK?'token='+encodeURIComponent(TK):'');
+  if(extra)q=q?q+'&'+extra:extra;
+  return q?'?'+q:'';
+}
+async function fList(){
+  var p=document.getElementById('fPath').value.trim();
+  document.getElementById('fInfo').textContent='读取中...';
+  try{
+    var r=await fetch('/files'+fUrl('path='+encodeURIComponent(p)),{headers:TK?{Authorization:'Bearer '+TK}:{}});
+    var d=await r.json();
+    if(d.error){document.getElementById('fList').innerHTML='<div class="empty" style="color:#f44336">'+esc(d.error)+'</div>';document.getElementById('fInfo').textContent='失败';return;}
+    var curPath=d.path||p;
+    var h='<div class="ti-r"><span class="n"><b>'+esc(curPath)+'</b></span><span class="dd">'+(d.entries||[]).length+' 项</span></div>';
+    var entries=(d.entries||[]).slice().sort(function(a,b){
+      if(a.type!==b.type)return a.type==='dir'?-1:1;
+      return a.name.localeCompare(b.name);
+    });
+    entries.forEach(function(e){
+      var icon=e.type==='dir'?'📁':'📄';
+      var sz=e.type==='dir'?'':((e.size/1024).toFixed(1)+' KB');
+      h+='<div class="ti-r"><span class="n fe" style="cursor:pointer" data-type="'+e.type+'" data-name="'+esc(e.name)+'">'+icon+' '+esc(e.name)+'</span><span class="dd">'+sz+'</span></div>';
+    });
+    var box=document.getElementById('fList');
+    box.innerHTML=h;
+    box.dataset.path=curPath;
+    Array.prototype.forEach.call(box.querySelectorAll('.fe'),function(el){
+      el.onclick=function(){
+        var full=fJoinPath(curPath,el.dataset.name);
+        if(el.dataset.type==='dir'){document.getElementById('fPath').value=full;fList();}
+        else{fDL(full);}
+      };
+    });
+    document.getElementById('fInfo').textContent=entries.length+' 项';
+  }catch(e){
+    document.getElementById('fList').innerHTML='<div class="empty" style="color:#f44336">'+esc(e.message)+'</div>';
+    document.getElementById('fInfo').textContent='失败';
+  }
+}
+function fUp(){
+  var p=document.getElementById('fPath').value.trim();
+  var parent=fParent(p);
+  if(parent&&parent!==p){document.getElementById('fPath').value=parent;fList();}
+}
+function fDownload(){
+  var p=document.getElementById('fPath').value.trim();
+  fDL(p);
+}
+function fDL(p){
+  var url='/files/get'+fUrl('path='+encodeURIComponent(p));
+  window.open(url,'_blank');
+}
+async function fUploadFile(){
+  var inp=document.getElementById('fUpload');
+  var f=inp.files&&inp.files[0];if(!f)return;
+  var dir=document.getElementById('fPath').value.trim();
+  var dest=fJoinPath(dir,f.name);
+  document.getElementById('fInfo').textContent='上传 '+f.name+'...';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/files/put'+fUrl('path='+encodeURIComponent(dest)),{method:'POST',headers:headers,body:f});
+    var d=await r.json();
+    if(d.ok){document.getElementById('fInfo').textContent='已上传到 '+dest;fList();}
+    else{document.getElementById('fInfo').textContent='失败';}
+  }catch(e){document.getElementById('fInfo').textContent='失败: '+e.message;}
+  inp.value='';
+}
+// ═══════ 剪贴板同步 ═══════
+async function clipRead(){
+  document.getElementById('clipInfo').textContent='读取中...';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/clipboard'+fUrl(),{headers:headers});
+    var d=await r.json();
+    document.getElementById('clipText').value=d.text||'';
+    document.getElementById('clipInfo').textContent=d.error?('失败: '+d.error):('已读取 '+(d.text||'').length+' 字符');
+  }catch(e){document.getElementById('clipInfo').textContent='失败: '+e.message;}
+}
+async function clipWrite(){
+  var t=document.getElementById('clipText').value;
+  document.getElementById('clipInfo').textContent='写入中...';
+  try{
+    var headers={'Content-Type':'application/json'};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/clipboard'+fUrl(),{method:'POST',headers:headers,body:JSON.stringify({text:t})});
+    var d=await r.json();
+    document.getElementById('clipInfo').textContent=d.ok?('已写入 '+t.length+' 字符到远程'):('失败: '+(d.error||'?'));
+  }catch(e){document.getElementById('clipInfo').textContent='失败: '+e.message;}
+}
+// ═══════ Wake-on-LAN ═══════
+async function wakeLoad(){
+  document.getElementById('wakeList').innerHTML='<div class="empty">查询中...</div>';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/wol'+fUrl(),{headers:headers});
+    var d=await r.json();
+    var hosts=d.hosts||[];
+    if(hosts.length===0){document.getElementById('wakeList').innerHTML='<div class="empty">无已记录 MAC — Agent 需先连一次并上报 sysinfo</div>';return;}
+    var h='';
+    hosts.forEach(function(host){
+      h+='<div class="card" style="padding:10px;margin-bottom:8px">';
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+      h+='<b style="color:#c0c8e0">'+esc(host.hostname)+'</b>';
+      h+='<span class="scr-src '+(host.online?'on':'off')+'">'+(host.online?'在线':'离线')+'</span>';
+      h+='</div>';
+      (host.macs||[]).forEach(function(m){
+        h+='<div class="ti-r"><span class="n">'+esc(m.name||'?')+' — <code>'+esc(m.mac)+'</code></span>';
+        h+='<button class="cbtn wk" data-mac="'+esc(m.mac)+'">唤醒</button></div>';
+      });
+      if((host.macs||[]).length===0)h+='<div class="dd">未记录 MAC</div>';
+      h+='</div>';
+    });
+    var box=document.getElementById('wakeList');
+    box.innerHTML=h;
+    Array.prototype.forEach.call(box.querySelectorAll('.wk'),function(b){
+      b.onclick=function(){wakeGo(b.dataset.mac,b);};
+    });
+  }catch(e){document.getElementById('wakeList').innerHTML='<div class="empty" style="color:#f44336">'+esc(e.message)+'</div>';}
+}
+async function wakeGo(mac,btn){
+  if(btn)btn.disabled=true;
+  document.getElementById('wakeInfo').textContent='发送 WoL 魔法包到 '+mac+'...';
+  try{
+    var headers={'Content-Type':'application/json'};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/wol'+fUrl(),{method:'POST',headers:headers,body:JSON.stringify({mac:mac})});
+    var d=await r.json();
+    if(d.ok){document.getElementById('wakeInfo').textContent='已广播到 '+((d.targets||[]).length)+' 个网段 · 端口 '+((d.ports||[]).join(','));}
+    else{document.getElementById('wakeInfo').textContent='失败: '+(d.error||JSON.stringify(d.errors||'?'));}
+  }catch(e){document.getElementById('wakeInfo').textContent='失败: '+e.message;}
+  if(btn)setTimeout(function(){btn.disabled=false},2000);
+}
+function wakeCustom(){
+  var m=document.getElementById('wakeMac').value.trim();
+  if(!m)return;
+  wakeGo(m);
 }
 function sPill(s,t){var e=document.getElementById('sPill');e.className='pill '+s;e.innerHTML='<span class="d"></span>'+t}
 function aPill(s,t){var e=document.getElementById('aPill');e.className='pill '+s;e.innerHTML='<span class="d"></span>'+t}

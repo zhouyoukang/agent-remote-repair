@@ -567,4 +567,39 @@ process.on("SIGTERM", function () {
 // 道核实例导出 — 万物皆可从此取
 module.exports = { kernel: kernel };
 
-main();
+// ═══════════════════════════════════════════════════════════
+// CLI 子命令 — 开机自启守护: --install / --uninstall / --service-status
+// 无为而无不为: 不与 main 争道, 命中则处理完毕即退出
+// ═══════════════════════════════════════════════════════════
+(function dispatchServiceCli() {
+  var argv = process.argv;
+  var daoService;
+  function lazy() {
+    if (!daoService) daoService = require("./dao_service");
+    return daoService;
+  }
+  function runAndExit(promise) {
+    promise
+      .then(function (r) {
+        console.log(JSON.stringify(r, null, 2));
+        process.exit(r.ok || r.installed ? 0 : 1);
+      })
+      .catch(function (e) {
+        console.error(e && e.stack ? e.stack : e);
+        process.exit(2);
+      });
+  }
+  if (argv.includes("--install")) {
+    runAndExit(lazy().install({ extraArgs: ["--no-browser"] }));
+    return;
+  }
+  if (argv.includes("--uninstall")) {
+    runAndExit(lazy().uninstall());
+    return;
+  }
+  if (argv.includes("--service-status")) {
+    runAndExit(lazy().status());
+    return;
+  }
+  main();
+})();

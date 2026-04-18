@@ -1,6 +1,6 @@
-# Competitive Analysis & Integration Roadmap — dao-remote v8.1
+# Competitive Analysis & Integration Roadmap — dao-remote v8.3
 
-**Date**: 2026-04-17
+**Date**: 2026-04-17 (initial) · 2026-04-19 (v8.3 refresh)
 **Method**: Tavily deep search + codebase reverse-engineering + workspace cross-scan
 
 ---
@@ -45,12 +45,12 @@
 ## 2. Gap Analysis — What dao-remote Still Needs
 
 ### Critical (P0)
-| Gap | RustDesk has it | MeshCentral has it | Effort |
-|-----|----------------|-------------------|--------|
-| **WebRTC P2P data channel** for streaming (bypass relay) | ✓ (via hole-punch) | ✓ (auto-upgrade from WS) | Medium |
-| **Persistent agent mode** (auto-start on boot, survive reboots) | ✓ (system service) | ✓ (Windows service) | Low |
-| **File transfer** | ✓ | ✓ | Medium |
-| **Clipboard sync** | ✓ | ✓ | Low |
+| Gap | Status | Effort |
+|-----|--------|--------|
+| **WebRTC P2P data channel** (browser ↔ source signaling) | ✅ v8.2 `/ws/rtc` + `/dao/rtc` REST fallback | Medium |
+| **Persistent agent mode** (auto-start on boot) | ✅ v8.3 `dao.js --install` (schtasks ONLOGON) | Low |
+| **File transfer** | ✅ v8.2 `/files` `/files/get` `/files/put` + v8.3 UI | Medium |
+| **Clipboard sync** | ✅ v8.2 `/dao/clipboard` GET/POST + v8.3 UI | Low |
 
 ### Important (P1)
 | Gap | Notes | Effort |
@@ -64,7 +64,7 @@
 | Gap | Notes |
 |-----|-------|
 | **Mobile agent** (Android) | Android MJPEG/WebRTC modules already exist in `020-投屏链路_Streaming/` |
-| **Wake-on-LAN** | UDP magic packet, trivial to add |
+| **Wake-on-LAN** | ✅ v8.3 `dao_wol.js` + `/dao/wol` + UI (唤醒 tab) — 102B magic packet, multi-broadcast |
 | **Chat/messaging** | MeshCentral has built-in messenger |
 | **Plugin system** | MeshCentral pushes JS to agent; dao could do similar via /tools endpoint |
 
@@ -125,11 +125,20 @@ Target (v9.0):
 
 ## 5. Immediate Next Actions (Prioritized)
 
-1. **WebRTC signaling endpoint** — Add `/rtc/offer` and `/rtc/answer` to `server.js`; browser sends SDP offer, hub relays to Ghost Shell or Android source
-2. **Windows service wrapper** — `sc.exe create` + NSSM or native Go service in Ghost Shell
-3. **File transfer API** — `/files/ls`, `/files/get`, `/files/put` in server.js using existing token auth
-4. **Clipboard WebSocket** — Ghost Shell reads Win32 clipboard → WS broadcast → browser paste
-5. **Android source registration** — Auto-discover Android MJPEG/WebRTC on LAN via mDNS `_screenstream._tcp`
+### ✅ Completed (v8.2 → v8.3)
+
+1. ~~**WebRTC signaling endpoint**~~ → `/ws/rtc` + `/dao/rtc` (v8.2)
+2. ~~**Windows service wrapper**~~ → `dao.js --install` via `schtasks /SC ONLOGON` (v8.3), no NSSM dep
+3. ~~**File transfer API**~~ → `/files` list + `/files/get` + `/files/put` (v8.2) + `/sense` 文件 tab (v8.3)
+4. ~~**Clipboard sync**~~ → `/dao/clipboard` GET/POST (v8.2) + `/sense` 剪贴板 tab (v8.3)
+5. ~~**Wake-on-LAN**~~ → `dao_wol.js` + `/dao/wol` + `/sense` 唤醒 tab, MAC harvested from Agent sysinfo (v8.3)
+
+### 🔜 Remaining
+
+1. **Android source registration** — Auto-discover Android MJPEG/WebRTC on LAN via mDNS `_screenstream._tcp`; extend `dao_mdns.js` browse method + auto-register in `dao_screen_registry`
+2. **AV1/VP9 encoder path** — Ghost Shell Go side: swap JPEG for libvpx/libaom; browser decodes via `VideoDecoder` API
+3. **Audio capture wiring** — WASAPI stub → WebRTC audio track
+4. **Session recording** — MP4 capture of WebRTC streams, server-side, optional
 
 ---
 

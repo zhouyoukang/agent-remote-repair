@@ -7,6 +7,7 @@ const { DaoKernel, DaoIdentity, DaoRateLimit } = require("../dao_kernel");
 const { SunloginBridge } = require("../dao_sunlogin");
 const { ScreenRegistry } = require("./dao_screen_registry");
 const daoPair = require("./dao_pair");
+const daoWol = require("./dao_wol");
 
 // 万法之资: 向日葵深度集成 — config解析 + 云API + 全功能调用
 var _sunloginBridge = new SunloginBridge();
@@ -1584,7 +1585,7 @@ function getUnifiedAgentScript(req) {
     '            $dk=Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue|%{@{drive=$_.DeviceID;sizeGB=[math]::Round($_.Size/1GB,1);freeGB=[math]::Round($_.FreeSpace/1GB,1)}}',
   );
   L.push(
-    '            $ad=Get-NetAdapter -EA SilentlyContinue|?{$_.Status -eq "Up"}|%{@{name=$_.Name;desc=$_.InterfaceDescription;speed=$_.LinkSpeed}}',
+    '            $ad=Get-NetAdapter -EA SilentlyContinue|?{$_.Status -eq "Up"}|%{@{name=$_.Name;desc=$_.InterfaceDescription;speed=$_.LinkSpeed;mac=$_.MacAddress}}',
   );
   L.push(
     '            Send-Msg $ws @{type="sysinfo";cpu=$c;os=$o.Caption+" "+$o.Version;ramGB=[math]::Round($o.TotalVisibleMemorySize/1MB,1);ramFreeGB=[math]::Round($o.FreePhysicalMemory/1MB,1);disks=$dk;adapters=$ad;processes=(Get-Process -EA SilentlyContinue).Count;uptime=[math]::Round((New-TimeSpan -Start $o.LastBootUpTime).TotalHours,1)}',
@@ -1937,6 +1938,78 @@ const server = http.createServer(function (req, res) {
           res.writeHead(400);
           res.end("bad json");
         }
+      });
+      return;
+    }
+    res.writeHead(405);
+    res.end("GET or POST only");
+    return;
+  }
+  // ── 道 · /dao/wol — Wake-on-LAN 魔法包 (远程修复之根: 机器没开机就没路)
+  //    GET  /dao/wol                    → 列出已知 Agent 的 MAC (从最近一次 sysinfo 推导)
+  //    POST /dao/wol   {mac,broadcast?,ports?,hostname?}  → 按 MAC 或按主机名唤醒
+  if (url.pathname === "/dao/wol") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (req.method === "GET") {
+      var list = [];
+      agentDataMap.forEach(function (d, h) {
+        var macs = [];
+        var adapters =
+          d.sysinfo && d.sysinfo.adapters ? d.sysinfo.adapters : [];
+        if (!Array.isArray(adapters) && adapters) adapters = [adapters];
+        (adapters || []).forEach(function (a) {
+          if (a && a.mac) macs.push({ name: a.name || "", mac: a.mac });
+        });
+        list.push({
+          hostname: h,
+          online: agentSockets.has(h) && agentSockets.get(h).readyState === 1,
+          macs: macs,
+        });
+      });
+      jsonReply(res, { ok: true, hosts: list });
+      return;
+    }
+    if (req.method === "POST") {
+      readBody(req, function (body) {
+        var msg = {};
+        try {
+          if (body) msg = JSON.parse(body);
+        } catch (e) {
+          jsonReply(res, { ok: false, error: "bad_json" }, 400);
+          return;
+        }
+        var mac = msg.mac || "";
+        // 无 mac 时按 hostname 自动查 — 无为而无不为
+        if (!mac && msg.hostname) {
+          var ad = agentDataMap.get(msg.hostname);
+          var adapters =
+            ad && ad.sysinfo && ad.sysinfo.adapters ? ad.sysinfo.adapters : [];
+          if (!Array.isArray(adapters) && adapters) adapters = [adapters];
+          for (var i = 0; i < (adapters || []).length; i++) {
+            if (adapters[i] && adapters[i].mac) {
+              mac = adapters[i].mac;
+              break;
+            }
+          }
+        }
+        if (!mac) {
+          jsonReply(res, { ok: false, error: "missing_mac" }, 400);
+          return;
+        }
+        var opts = {};
+        if (msg.broadcast) opts.broadcast = msg.broadcast;
+        if (msg.ports && Array.isArray(msg.ports)) opts.ports = msg.ports;
+        daoWol
+          .wake(mac, opts)
+          .then(function (r) {
+            jsonReply(res, Object.assign({ mac: mac }, r));
+          })
+          .catch(function (e) {
+            jsonReply(res, { ok: false, mac: mac, error: e.message }, 400);
+          });
       });
       return;
     }
@@ -3751,6 +3824,7 @@ function start(port, _retryCount) {
     console.log(
       "剪贴板: http://" + primaryHost + ":" + port + "/dao/clipboard",
     );
+    console.log("WoL:    http://" + primaryHost + ":" + port + "/dao/wol");
     console.log("WebRTC: ws://" + primaryHost + ":" + port + "/ws/rtc");
     console.log("道法:  软编码一切 · URL请求自知 · 唯变所适");
     console.log("=============================================\n");

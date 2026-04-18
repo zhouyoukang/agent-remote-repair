@@ -9,10 +9,28 @@ const os = require("os");
 
 var okCount = 0;
 var failCount = 0;
+var pending = []; // 异步测试 Promise 队列 — 在总结前统一 await
 
 function ok(name, fn) {
   try {
-    fn();
+    var r = fn();
+    if (r && typeof r.then === "function") {
+      pending.push(
+        r.then(
+          function () {
+            console.log("  \u2713 " + name);
+            okCount++;
+          },
+          function (e) {
+            console.log(
+              "  \u2717 " + name + "\n      " + (e && e.stack ? e.stack : e),
+            );
+            failCount++;
+          },
+        ),
+      );
+      return;
+    }
     console.log("  \u2713 " + name);
     okCount++;
   } catch (e) {
@@ -213,6 +231,114 @@ ok("DaoMdns.stop() 无 socket 时安全", function () {
   m.stop();
 });
 
+console.log("\n[4c] dao_wol \u00b7 Wake-on-LAN \u9b54\u6cd5\u5305");
+const daoWol = require("./remote-agent/dao_wol");
+ok("parseMac 多种分隔符", function () {
+  assert.deepStrictEqual(
+    daoWol.parseMac("AA:BB:CC:DD:EE:FF"),
+    Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+  );
+  assert.deepStrictEqual(
+    daoWol.parseMac("aa-bb-cc-dd-ee-ff"),
+    Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+  );
+  assert.deepStrictEqual(
+    daoWol.parseMac("AABBCCDDEEFF"),
+    Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+  );
+});
+ok("parseMac 非法返回 null", function () {
+  assert.strictEqual(daoWol.parseMac(""), null);
+  assert.strictEqual(daoWol.parseMac("AA:BB"), null);
+  assert.strictEqual(daoWol.parseMac("ZZ:BB:CC:DD:EE:FF"), null);
+});
+ok("buildMagicPacket 102 字节 · 头 6×0xFF + MAC×16", function () {
+  var p = daoWol.buildMagicPacket("11:22:33:44:55:66");
+  assert.strictEqual(p.length, 102);
+  assert.strictEqual(p.slice(0, 6).toString("hex"), "ffffffffffff");
+  for (var i = 0; i < 16; i++) {
+    assert.strictEqual(
+      p.slice(6 + i * 6, 12 + i * 6).toString("hex"),
+      "112233445566",
+      "MAC repetition #" + i,
+    );
+  }
+});
+ok("ipv4Broadcast 经典 /24", function () {
+  assert.strictEqual(
+    daoWol.ipv4Broadcast("192.168.1.42", "255.255.255.0"),
+    "192.168.1.255",
+  );
+  assert.strictEqual(
+    daoWol.ipv4Broadcast("10.0.0.5", "255.0.0.0"),
+    "10.255.255.255",
+  );
+});
+ok("lanBroadcasts \u5305\u542b 255.255.255.255 \u5154\u5e95", function () {
+  var list = daoWol.lanBroadcasts();
+  assert.ok(Array.isArray(list));
+  assert.ok(list.indexOf("255.255.255.255") >= 0);
+});
+
+console.log("\n[4e] dao_service \u00b7 \u5f00\u673a\u81ea\u542f\u5b88\u62a4");
+const daoService = require("./dao_service");
+ok("API \u5b8c\u5907 \u00b7 install/uninstall/status/TASK_NAME", function () {
+  assert.strictEqual(typeof daoService.install, "function");
+  assert.strictEqual(typeof daoService.uninstall, "function");
+  assert.strictEqual(typeof daoService.status, "function");
+  assert.strictEqual(typeof daoService.TASK_NAME, "string");
+  assert.ok(daoService.TASK_NAME.length > 0);
+});
+ok("_nodeExe / _daoScript \u8fd4\u7edd\u5bf9\u8def\u5f84", function () {
+  var ne = daoService._nodeExe();
+  var ds = daoService._daoScript();
+  assert.ok(path.isAbsolute(ne), "node not absolute: " + ne);
+  assert.ok(path.isAbsolute(ds), "dao not absolute: " + ds);
+  assert.ok(/dao\.js$/i.test(ds), "dao script wrong: " + ds);
+});
+ok(
+  "status() \u672a\u5b89\u88c5\u65f6\u8fd4 installed:false",
+  async function () {
+    var r = await daoService.status({
+      taskName: "DaoNeverExists_" + Date.now(),
+    });
+    if (process.platform === "win32") {
+      assert.strictEqual(r.installed, false);
+    } else {
+      assert.strictEqual(r.installed, false);
+      assert.strictEqual(r.error, "unsupported_platform");
+    }
+  },
+);
+
+console.log("\n[4d] page.js \u6e32\u67d3 \u00b7 \u4e09\u65b0\u9875");
+const makePage = require("./remote-agent/page.js");
+ok(
+  "\u65e0\u4ee4\u724c\u6e32\u67d3 \u5305\u542b\u6587\u4ef6/\u526a\u8d34\u677f/\u5524\u9192\u6807\u7b7e",
+  function () {
+    var html = makePage("127.0.0.1:3002", "");
+    assert.ok(html.length > 10000, "html too short: " + html.length);
+    assert.ok(html.indexOf("go('files'") > 0, "files tab missing");
+    assert.ok(html.indexOf("go('clip'") > 0, "clip tab missing");
+    assert.ok(html.indexOf("go('wake'") > 0, "wake tab missing");
+    assert.ok(html.indexOf('id="p-files"') > 0, "files page div missing");
+    assert.ok(html.indexOf('id="p-clip"') > 0, "clip page div missing");
+    assert.ok(html.indexOf('id="p-wake"') > 0, "wake page div missing");
+    assert.ok(html.indexOf("/dao/wol") > 0, "WoL endpoint not wired");
+    assert.ok(html.indexOf("/dao/clipboard") > 0, "clipboard not wired");
+    assert.ok(html.indexOf("/files/put") > 0, "upload not wired");
+    assert.ok(html.indexOf('var TK=""') > 0, "empty token var mismatch");
+  },
+);
+ok(
+  "\u6709\u4ee4\u724c\u6e32\u67d3 token \u6b63\u786e\u5d4c\u5165",
+  function () {
+    var html = makePage("example.ts.net", "deadbeef");
+    assert.ok(html.indexOf('var TK="deadbeef"') > 0, "token not embedded");
+    assert.ok(html.indexOf("undefined") < 0, "undefined leaked");
+  },
+);
+
 console.log("\n[5] createPairing \u4e0e kernel \u62fc\u6b63");
 ok("createPairing 返回 { uri, token, ips, ... }", function () {
   var kernel = new DaoKernel(tmpDir);
@@ -227,18 +353,20 @@ ok("createPairing 返回 { uri, token, ips, ... }", function () {
   assert.strictEqual(parsed.token, pair.token);
 });
 
-console.log(
-  "\n============= \u901a\u8fc7 " +
-    okCount +
-    " / \u5931\u8d25 " +
-    failCount +
-    " =============\n",
-);
+Promise.all(pending).then(function () {
+  console.log(
+    "\n============= \u901a\u8fc7 " +
+      okCount +
+      " / \u5931\u8d25 " +
+      failCount +
+      " =============\n",
+  );
 
-// 清理测试身份目录
-try {
-  var fs = require("fs");
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-} catch (e) {}
+  // 清理测试身份目录
+  try {
+    var fs = require("fs");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch (e) {}
 
-process.exit(failCount === 0 ? 0 : 1);
+  process.exit(failCount === 0 ? 0 : 1);
+});

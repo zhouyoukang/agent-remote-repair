@@ -231,6 +231,142 @@ ok("DaoMdns.stop() 无 socket 时安全", function () {
   m.stop();
 });
 
+const mdnsMod = require("./remote-agent/dao_mdns");
+ok("DaoMdnsBrowser API \u5b8c\u5907", function () {
+  assert.strictEqual(typeof mdnsMod.DaoMdnsBrowser, "function");
+  var b = new mdnsMod.DaoMdnsBrowser({
+    serviceTypes: ["_screenstream._tcp.local"],
+  });
+  assert.deepStrictEqual(b.serviceTypes, ["_screenstream._tcp.local"]);
+  assert.strictEqual(typeof b.start, "function");
+  assert.strictEqual(typeof b.stop, "function");
+  assert.strictEqual(typeof b.services, "function");
+  assert.deepStrictEqual(b.services(), []);
+});
+ok("buildQuery \u00b7 PTR \u95ee\u5305 12+name+4 \u5b57\u8282", function () {
+  var q = mdnsMod._buildQuery("_screenstream._tcp.local", mdnsMod.TYPE_PTR);
+  // header 12 + "_screenstream"(14) + "_tcp"(5) + "local"(6) + root(1) + qtype+qclass(4) = 42
+  assert.strictEqual(q.length, 12 + 14 + 5 + 6 + 1 + 4);
+  assert.strictEqual(q.readUInt16BE(2), 0, "flags=0 (query)");
+  assert.strictEqual(q.readUInt16BE(4), 1, "qdcount=1");
+  // 末 4 字节: type=12 class=1
+  assert.strictEqual(q.readUInt16BE(q.length - 4), 12);
+  assert.strictEqual(q.readUInt16BE(q.length - 2), 1);
+});
+ok("parseResponse 往返 · PTR+SRV+TXT+A 完整解析", function () {
+  var SVC = "_screenstream._tcp.local";
+  var INST = "Pixel7._screenstream._tcp.local";
+  var HOST = "pixel7.local";
+  var answers = [
+    mdnsMod._writeRR(
+      SVC,
+      mdnsMod.TYPE_PTR,
+      mdnsMod.CLASS_IN,
+      120,
+      mdnsMod._rdataPTR(INST),
+    ),
+    mdnsMod._writeRR(
+      INST,
+      mdnsMod.TYPE_SRV,
+      0x8001,
+      120,
+      mdnsMod._rdataSRV(0, 0, 8080, HOST),
+    ),
+    mdnsMod._writeRR(
+      INST,
+      mdnsMod.TYPE_TXT,
+      0x8001,
+      120,
+      mdnsMod._rdataTXT(["path=/stream.mjpeg", "name=Pixel 7"]),
+    ),
+    mdnsMod._writeRR(
+      HOST,
+      mdnsMod.TYPE_A,
+      0x8001,
+      120,
+      mdnsMod._rdataA("192.168.1.42"),
+    ),
+  ];
+  var msg = mdnsMod._buildResponse(answers);
+  var parsed = mdnsMod._parseResponse(msg);
+  assert.ok(parsed, "parseResponse returned null");
+  assert.strictEqual(parsed.records.length, 4);
+  var b = new mdnsMod.DaoMdnsBrowser({ serviceTypes: [SVC] });
+  var services = b._assembleFromRecords(parsed.records);
+  assert.strictEqual(services.length, 1);
+  var s = services[0];
+  assert.strictEqual(s.ip, "192.168.1.42");
+  assert.strictEqual(s.port, 8080);
+  assert.strictEqual(s.txt.path, "/stream.mjpeg");
+  assert.strictEqual(s.txt.name, "Pixel 7");
+  assert.strictEqual(s.host, "pixel7.local");
+  assert.strictEqual(s.serviceType, "_screenstream._tcp.local");
+});
+ok("parseResponse 忽略非响应包 (flags QR=0)", function () {
+  var q = mdnsMod._buildQuery("_dao._tcp.local", mdnsMod.TYPE_PTR);
+  var parsed = mdnsMod._parseResponse(q);
+  assert.strictEqual(parsed, null);
+});
+ok("DaoMdnsBrowser.stop() 无 socket 时安全", function () {
+  var b = new mdnsMod.DaoMdnsBrowser({ serviceTypes: ["_dao._tcp.local"] });
+  b.stop();
+});
+ok("DaoMdnsBrowser _onMessage: goodbye (ttl=0) 触发 removed 事件", function () {
+  var b = new mdnsMod.DaoMdnsBrowser({
+    serviceTypes: ["_screenstream._tcp.local"],
+  });
+  // 先注册: 正常 TTL 的 PTR
+  var SVC = "_screenstream._tcp.local";
+  var INST = "Dev1._screenstream._tcp.local";
+  var HOST = "dev1.local";
+  var regMsg = mdnsMod._buildResponse([
+    mdnsMod._writeRR(
+      SVC,
+      mdnsMod.TYPE_PTR,
+      mdnsMod.CLASS_IN,
+      120,
+      mdnsMod._rdataPTR(INST),
+    ),
+    mdnsMod._writeRR(
+      INST,
+      mdnsMod.TYPE_SRV,
+      0x8001,
+      120,
+      mdnsMod._rdataSRV(0, 0, 9999, HOST),
+    ),
+    mdnsMod._writeRR(
+      HOST,
+      mdnsMod.TYPE_A,
+      0x8001,
+      120,
+      mdnsMod._rdataA("10.0.0.9"),
+    ),
+  ]);
+  var svcEvents = 0;
+  var rmEvents = 0;
+  b.on("service", function () {
+    svcEvents++;
+  });
+  b.on("removed", function () {
+    rmEvents++;
+  });
+  b._onMessage(regMsg);
+  assert.strictEqual(svcEvents, 1, "service event missing");
+  assert.strictEqual(rmEvents, 0);
+  // goodbye: ttl=0 PTR
+  var byeMsg = mdnsMod._buildResponse([
+    mdnsMod._writeRR(
+      SVC,
+      mdnsMod.TYPE_PTR,
+      mdnsMod.CLASS_IN,
+      0,
+      mdnsMod._rdataPTR(INST),
+    ),
+  ]);
+  b._onMessage(byeMsg);
+  assert.strictEqual(rmEvents, 1, "removed event missing");
+});
+
 console.log("\n[4c] dao_wol \u00b7 Wake-on-LAN \u9b54\u6cd5\u5305");
 const daoWol = require("./remote-agent/dao_wol");
 ok("parseMac 多种分隔符", function () {

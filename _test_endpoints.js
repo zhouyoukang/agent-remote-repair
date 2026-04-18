@@ -24,12 +24,16 @@ function ok(name, fn) {
           resolve();
         })
         .catch(function (e) {
-          console.log("  \u2717 " + name + "\n      " + (e && e.stack ? e.stack : e));
+          console.log(
+            "  \u2717 " + name + "\n      " + (e && e.stack ? e.stack : e),
+          );
           failCount++;
           resolve();
         });
     } catch (e) {
-      console.log("  \u2717 " + name + "\n      " + (e && e.stack ? e.stack : e));
+      console.log(
+        "  \u2717 " + name + "\n      " + (e && e.stack ? e.stack : e),
+      );
       failCount++;
       resolve();
     }
@@ -56,11 +60,17 @@ function req(method, path, body) {
         try {
           data = JSON.parse(raw);
         } catch (e) {}
-        resolve({ status: res.statusCode, headers: res.headers, body: data, raw: raw });
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: data,
+          raw: raw,
+        });
       });
     });
     r.on("error", reject);
-    if (body != null) r.write(typeof body === "string" ? body : JSON.stringify(body));
+    if (body != null)
+      r.write(typeof body === "string" ? body : JSON.stringify(body));
     r.end();
   });
 }
@@ -97,26 +107,38 @@ async function waitListen() {
     if (r.body.ok !== false) throw new Error("expected ok:false");
   });
 
-  await ok("POST /dao/wol 合法 mac 实发魔法包 (loopback 广播)", async function () {
-    var r = await req("POST", "/dao/wol", {
-      mac: "11:22:33:44:55:66",
-      broadcast: ["127.0.0.1"],
-    });
-    if (r.status !== 200) throw new Error("status " + r.status + " body=" + r.raw);
-    if (r.body.mac !== "11:22:33:44:55:66") throw new Error("mac echo mismatch");
-    if (!r.body.targets || r.body.targets.indexOf("127.0.0.1") < 0)
-      throw new Error("target not echoed: " + JSON.stringify(r.body));
-  });
+  await ok(
+    "POST /dao/wol 合法 mac 实发魔法包 (loopback 广播)",
+    async function () {
+      var r = await req("POST", "/dao/wol", {
+        mac: "11:22:33:44:55:66",
+        broadcast: ["127.0.0.1"],
+      });
+      if (r.status !== 200)
+        throw new Error("status " + r.status + " body=" + r.raw);
+      if (r.body.mac !== "11:22:33:44:55:66")
+        throw new Error("mac echo mismatch");
+      if (!r.body.targets || r.body.targets.indexOf("127.0.0.1") < 0)
+        throw new Error("target not echoed: " + JSON.stringify(r.body));
+    },
+  );
 
   console.log("\n[II] /files");
   await ok("GET /files?path=. 返回 entries", async function () {
-    var r = await req("GET", "/files?path=" + encodeURIComponent(process.cwd()));
+    var r = await req(
+      "GET",
+      "/files?path=" + encodeURIComponent(process.cwd()),
+    );
     if (r.status !== 200) throw new Error("status " + r.status);
     if (!Array.isArray(r.body.entries)) throw new Error("no entries");
-    if (!r.body.entries.some(function (e) {
-      return e.name === "package.json" || e.name === "_test_wuwei.js";
-    })) {
-      throw new Error("known file missing: " + JSON.stringify(r.body.entries.slice(0, 5)));
+    if (
+      !r.body.entries.some(function (e) {
+        return e.name === "package.json" || e.name === "_test_wuwei.js";
+      })
+    ) {
+      throw new Error(
+        "known file missing: " + JSON.stringify(r.body.entries.slice(0, 5)),
+      );
     }
   });
 
@@ -127,7 +149,24 @@ async function waitListen() {
     if (typeof r.body.text !== "string") throw new Error("text not string");
   });
 
-  console.log("\n[IV] /sense (page render)");
+  console.log("\n[IV.5] /dao/mdns");
+  await ok("GET /dao/mdns 返回 {enabled:true, services:[]}", async function () {
+    var r = await req("GET", "/dao/mdns");
+    if (r.status !== 200) throw new Error("status " + r.status);
+    if (typeof r.body.enabled !== "boolean")
+      throw new Error("enabled not bool: " + JSON.stringify(r.body));
+    if (!Array.isArray(r.body.services)) throw new Error("services not array");
+    if (!Array.isArray(r.body.dynIds)) throw new Error("dynIds not array");
+  });
+  await ok("POST /dao/mdns/refresh 触发查询", async function () {
+    var r = await req("POST", "/dao/mdns/refresh", {});
+    if (r.status !== 200 && r.status !== 503)
+      throw new Error("status " + r.status + " body=" + r.raw);
+    if (r.status === 200 && r.body.ok !== true)
+      throw new Error("expected ok:true: " + r.raw);
+  });
+
+  console.log("\n[V] /sense (page render)");
   await ok("GET /sense 返回 HTML 含新标签", async function () {
     var r = await req("GET", "/sense");
     if (r.status !== 200) throw new Error("status " + r.status);

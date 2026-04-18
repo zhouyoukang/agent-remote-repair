@@ -8,6 +8,7 @@ const { SunloginBridge } = require("../dao_sunlogin");
 const { ScreenRegistry } = require("./dao_screen_registry");
 const daoPair = require("./dao_pair");
 const daoWol = require("./dao_wol");
+const { DaoMdnsBrowser } = require("./dao_mdns");
 
 // 万法之资: 向日葵深度集成 — config解析 + 云API + 全功能调用
 var _sunloginBridge = new SunloginBridge();
@@ -814,6 +815,117 @@ _screenReg.register({
   capture: null,
   input: null,
 });
+
+// ==================== mDNS 动态发现: 万法之资 — 同网段 Android/ScreenStream 自扫 ====================
+// 道法自然: 扫 _screenstream._tcp (Android ScreenStream) + _dao._tcp (同族 hub)
+// 每发现一个新 instance → 自动写入 _screenReg, 探活 + 展示于 /screen/sources
+// 可禁用: DAO_NO_MDNS_BROWSE=1
+var _mdnsBrowser = null;
+var _mdnsDynIds = new Set(); // 已注册的 mdns-xxx id 集
+if (process.env.DAO_NO_MDNS_BROWSE !== "1") {
+  try {
+    _mdnsBrowser = new DaoMdnsBrowser({
+      serviceTypes: ["_screenstream._tcp.local", "_dao._tcp.local"],
+      queryInterval: 30000,
+      log: function (m) {
+        console.log("[mdns-browser] " + m);
+      },
+    });
+    _mdnsBrowser.on("service", function (info) {
+      // 派生唯一 id: mdns-<serviceShort>-<instanceHash8>
+      var svcShort = (info.serviceType || "svc")
+        .replace(/^_/, "")
+        .replace(/\._tcp\.local$/, "")
+        .replace(/[^a-z0-9]+/gi, "")
+        .slice(0, 16);
+      var hash = crypto
+        .createHash("sha256")
+        .update(info.instance)
+        .digest("hex")
+        .slice(0, 8);
+      var id = "mdns-" + svcShort + "-" + hash;
+      var url = "http://" + info.ip + ":" + info.port;
+      var healthPath =
+        (info.txt && info.txt.path) ||
+        (svcShort === "screenstream" ? "/" : "/status");
+      if (_mdnsDynIds.has(id)) {
+        // 已注册 → 只更新 state.url (下次 probe 换新地址)
+        var s = _screenReg.state.get(id);
+        if (s) s.url = url;
+        return;
+      }
+      _screenReg.register({
+        id: id,
+        name:
+          (info.txt && (info.txt.name || info.txt.device)) ||
+          info.instance.split(".")[0],
+        priority: svcShort === "screenstream" ? 55 : 35,
+        url: url,
+        healthPath: healthPath,
+        probe: function () {
+          return new Promise(function (resolve) {
+            try {
+              var req = http.get(
+                url + healthPath,
+                { timeout: 2000 },
+                function (res) {
+                  res.resume();
+                  resolve(res.statusCode >= 200 && res.statusCode < 500);
+                },
+              );
+              req.on("error", function () {
+                resolve(false);
+              });
+              req.on("timeout", function () {
+                req.destroy();
+                resolve(false);
+              });
+            } catch (e) {
+              resolve(false);
+            }
+          });
+        },
+        capture: null, // 暂不代理流, 只注册可达; 后续可加 MJPEG 直通
+        input: null,
+      });
+      _mdnsDynIds.add(id);
+      console.log(
+        "[mdns-browser] 注册动态源: " +
+          id +
+          " → " +
+          url +
+          " (" +
+          info.serviceType +
+          ")",
+      );
+    });
+    _mdnsBrowser.on("removed", function (info) {
+      var svcShort = (info.serviceType || "svc")
+        .replace(/^_/, "")
+        .replace(/\._tcp\.local$/, "")
+        .replace(/[^a-z0-9]+/gi, "")
+        .slice(0, 16);
+      var hash = crypto
+        .createHash("sha256")
+        .update(info.instance)
+        .digest("hex")
+        .slice(0, 8);
+      var id = "mdns-" + svcShort + "-" + hash;
+      if (_mdnsDynIds.has(id)) {
+        var s = _screenReg.state.get(id);
+        if (s) {
+          s.status = "offline";
+          s.lastError = "mdns goodbye/stale";
+          s.lastCheck = Date.now();
+        }
+        console.log("[mdns-browser] 下线: " + id);
+      }
+    });
+    _mdnsBrowser.start();
+  } catch (e) {
+    console.log("[mdns-browser] 启动失败: " + e.message);
+  }
+}
 
 // ==================== ADB兜底: 万法之资 — 无服务也能控 ====================
 // 道法自然: 将高层action映射为原始ADB命令, 适配一切Android设备
@@ -2015,6 +2127,54 @@ const server = http.createServer(function (req, res) {
     }
     res.writeHead(405);
     res.end("GET or POST only");
+    return;
+  }
+  // ── 道 · /dao/mdns — 已扫描到的同网段 DNS-SD 服务 (Android ScreenStream / dao peer)
+  //    GET  /dao/mdns                     → { services: [{instance,ip,port,txt,...}], dynIds: [...] }
+  //    POST /dao/mdns/refresh             → 立即触发一次 PTR 查询 (手动重扫)
+  if (url.pathname === "/dao/mdns") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (req.method === "GET") {
+      var services = _mdnsBrowser ? _mdnsBrowser.services() : [];
+      var dynIds = [];
+      _mdnsDynIds.forEach(function (id) {
+        dynIds.push(id);
+      });
+      jsonReply(res, {
+        ok: true,
+        enabled: !!_mdnsBrowser,
+        services: services,
+        dynIds: dynIds,
+      });
+      return;
+    }
+    res.writeHead(405);
+    res.end("GET only");
+    return;
+  }
+  if (url.pathname === "/dao/mdns/refresh") {
+    if (!checkToken(req)) {
+      denyToken(res);
+      return;
+    }
+    if (req.method !== "POST") {
+      res.writeHead(405);
+      res.end("POST only");
+      return;
+    }
+    if (!_mdnsBrowser) {
+      jsonReply(res, { ok: false, error: "mdns browser disabled" }, 503);
+      return;
+    }
+    try {
+      _mdnsBrowser._query();
+      jsonReply(res, { ok: true, types: _mdnsBrowser.serviceTypes });
+    } catch (e) {
+      jsonReply(res, { ok: false, error: e.message }, 500);
+    }
     return;
   }
   // ── 道 · /dao/discover — 五感之根: 身份 + LAN IP + 端口 + NAT 状态
@@ -3825,6 +3985,7 @@ function start(port, _retryCount) {
       "剪贴板: http://" + primaryHost + ":" + port + "/dao/clipboard",
     );
     console.log("WoL:    http://" + primaryHost + ":" + port + "/dao/wol");
+    console.log("mDNS:   http://" + primaryHost + ":" + port + "/dao/mdns");
     console.log("WebRTC: ws://" + primaryHost + ":" + port + "/ws/rtc");
     console.log("道法:  软编码一切 · URL请求自知 · 唯变所适");
     console.log("=============================================\n");

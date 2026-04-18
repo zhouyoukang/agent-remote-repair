@@ -1,6 +1,6 @@
-# Competitive Analysis & Integration Roadmap — dao-remote v8.3
+# Competitive Analysis & Integration Roadmap — dao-remote v8.4
 
-**Date**: 2026-04-17 (initial) · 2026-04-19 (v8.3 refresh)
+**Date**: 2026-04-17 (initial) · 2026-04-19 (v8.3 refresh · v8.4 mDNS browse)
 **Method**: Tavily deep search + codebase reverse-engineering + workspace cross-scan
 
 ---
@@ -125,20 +125,20 @@ Target (v9.0):
 
 ## 5. Immediate Next Actions (Prioritized)
 
-### ✅ Completed (v8.2 → v8.3)
+### ✅ Completed (v8.2 → v8.4)
 
 1. ~~**WebRTC signaling endpoint**~~ → `/ws/rtc` + `/dao/rtc` (v8.2)
 2. ~~**Windows service wrapper**~~ → `dao.js --install` via `schtasks /SC ONLOGON` (v8.3), no NSSM dep
 3. ~~**File transfer API**~~ → `/files` list + `/files/get` + `/files/put` (v8.2) + `/sense` 文件 tab (v8.3)
 4. ~~**Clipboard sync**~~ → `/dao/clipboard` GET/POST (v8.2) + `/sense` 剪贴板 tab (v8.3)
 5. ~~**Wake-on-LAN**~~ → `dao_wol.js` + `/dao/wol` + `/sense` 唤醒 tab, MAC harvested from Agent sysinfo (v8.3)
+6. ~~**Android source registration**~~ → `DaoMdnsBrowser` class in `dao_mdns.js` browses `_screenstream._tcp.local` + `_dao._tcp.local`, auto-registers discovered peers into `_screenReg` (v8.4); exposed at `/dao/mdns` + `/dao/mdns/refresh`
 
 ### 🔜 Remaining
 
-1. **Android source registration** — Auto-discover Android MJPEG/WebRTC on LAN via mDNS `_screenstream._tcp`; extend `dao_mdns.js` browse method + auto-register in `dao_screen_registry`
-2. **AV1/VP9 encoder path** — Ghost Shell Go side: swap JPEG for libvpx/libaom; browser decodes via `VideoDecoder` API
-3. **Audio capture wiring** — WASAPI stub → WebRTC audio track
-4. **Session recording** — MP4 capture of WebRTC streams, server-side, optional
+1. **AV1/VP9 encoder path** — Ghost Shell Go side: swap JPEG for libvpx/libaom; browser decodes via `VideoDecoder` API
+2. **Audio capture wiring** — WASAPI stub → WebRTC audio track
+3. **Session recording** — MP4 capture of WebRTC streams, server-side, optional
 
 ---
 

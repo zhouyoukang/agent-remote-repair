@@ -1116,7 +1116,17 @@ def main():
 
     class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
-    server = ThreadingHTTPServer(('0.0.0.0', PORT), AgentRelayHandler)
+    # 道·柔弱胜刚强: 仅绑 127.0.0.1 — Relay 仅由本机 dao.js 代理访问, 无需对外.
+    # 避免 Windows Hyper-V/WSL/winnat 对 0.0.0.0 高端口段的 PermissionError 10013.
+    try:
+        server = ThreadingHTTPServer(('127.0.0.1', PORT), AgentRelayHandler)
+    except PermissionError as e:
+        print(f"[relay!] Port {PORT} bind denied ({e}) — ", end='')
+        print("Windows 可能预留了此端口段. dao.js 会换口重启.", flush=True)
+        sys.exit(1)
+    except OSError as e:
+        print(f"[relay!] Port {PORT} bind failed: {e}", flush=True)
+        sys.exit(1)
     hostname = socket.gethostname()
     print(f"""
 ╔══════════════════════════════════════════════════════════╗

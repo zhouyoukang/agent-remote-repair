@@ -36,8 +36,21 @@ var natMapper = null;
 var mdnsAdvert = null;
 
 // 唯变所适: CLI覆盖仅在用户明确指定时生效
+// --lan-only: 两仪不出门 · 关闭所有公网暴露 (= --no-tunnel + --no-nat)
+var LAN_ONLY =
+  process.argv.includes("--lan-only") || process.env.DAO_LAN_ONLY === "1";
 var NO_TUNNEL =
-  process.argv.includes("--no-tunnel") || process.env.NO_TUNNEL === "1";
+  LAN_ONLY ||
+  process.argv.includes("--no-tunnel") ||
+  process.env.NO_TUNNEL === "1";
+// --no-nat: 显式禁用 UPnP/NAT-PMP (与 DAO_NO_NAT 对称, CLI 用户无需设 env)
+if (
+  LAN_ONLY ||
+  process.argv.includes("--no-nat") ||
+  process.env.DAO_NO_NAT === "1"
+) {
+  process.env.DAO_NO_NAT = "1";
+}
 var OVERRIDE_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 0;
 
 // ═══════════════════════════════════════════════════════════
@@ -74,11 +87,25 @@ function startRelay(relayPort, token) {
   relayProcess.on("close", function (code) {
     relayProcess = null;
     if (!relayRestarting) {
-      console.log("[relay] Exited (" + code + "), restarting in 5s...");
+      // 道·反者道之动: 若因端口权限 (Windows 保留) 反复失败, 换个新口
+      var nextPort = code !== 0 ? DaoEntropy.portSync() : relayPort;
+      if (nextPort !== relayPort) {
+        _log(
+          "[relay] Exited (" +
+            code +
+            "), port " +
+            relayPort +
+            " may be reserved — retrying on " +
+            nextPort +
+            " in 5s...",
+        );
+      } else {
+        _log("[relay] Exited (" + code + "), restarting in 5s...");
+      }
       relayRestarting = true;
       setTimeout(function () {
         relayRestarting = false;
-        startRelay(relayPort, token);
+        startRelay(nextPort, token);
       }, 5000);
     }
   });
@@ -325,7 +352,7 @@ function main() {
 
   console.log("");
   console.log("  ╔══════════════════════════════════════════════════════╗");
-  console.log("  ║   道 · Agent Remote Repair Hub v8.0                  ║");
+  console.log("  ║   道 · Agent Remote Repair Hub v8.7                  ║");
   console.log("  ║   Ed25519端到端 · 道核驱动 · 唯变所适 · 万法归宗    ║");
   console.log("  ╚══════════════════════════════════════════════════════╝");
   console.log("");

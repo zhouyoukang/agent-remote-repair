@@ -25,6 +25,9 @@ ps-agent/dao_state.json
 .DS_Store
 Thumbs.db
 *.log
+*.err
+_dao_*.pid
+_dao_*.txt
 
 # IDE
 .vscode/

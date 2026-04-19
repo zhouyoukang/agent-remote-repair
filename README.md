@@ -1,4 +1,4 @@
-# Agent Remote Repair Hub v8.0
+# Agent Remote Repair Hub v8.7
 
 > Ed25519端到端 · 道法自然 · 万法归宗 · 零成本 · 零配置 · 零注册
 
@@ -36,6 +36,16 @@ git clone https://github.com/zhouyoukang/agent-remote-repair.git
 cd agent-remote-repair
 npm install && npm start
 ```
+
+## 自检 (可选)
+
+```bash
+npm test              # 45 单元 + 29 端点集成 (不需外网, 不依赖投屏硬件)
+npm run test:unit     # 仅跑 _test_wuwei.js (模块契约)
+npm run test:endpoints # 仅跑 _test_endpoints.js (拉起 hub 真实打端点)
+```
+
+覆盖: `/dao/discover` · `/status` · `/api/health` · `/tools` · `/pair(+claim)` · `/c` · PWA · `/files` · `/dao/wol` · `/dao/clipboard` · `/dao/mdns` · `/dao/record` · `/screen/sources` · `/go` · `/sense` · `/brain/state`
 
 ## 前置要求
 
@@ -210,8 +220,50 @@ priority 数字定义于 `dao_screen_registry`，越小越优。`capture` 为函
 | `PUBLIC_URL` | env → 隧道 URL → NAT 映射 URL → 请求自描述 | 不再预设 `localhost:PORT` |
 | `NO_TUNNEL` | `0` | `1` 禁用 cloudflared/ngrok/SSH |
 | `DAO_NO_NAT` | `0` | `1` 禁用 UPnP IGD / NAT-PMP 自穿 |
+| `DAO_LAN_ONLY` | `0` | `1` 两仪不出门 — 等价 `NO_TUNNEL=1 + DAO_NO_NAT=1` |
+| `DAO_NO_BROWSER` | `0` | `1` 禁用启动后自开浏览器 |
+| `DAO_NO_MDNS` | `0` | `1` 禁用 `dao-<fp8>.local` mDNS 广播 |
 
 > 详见 `.env.example`
+
+## CLI 参数
+
+```bash
+node dao.js [选项]
+```
+
+| 选项 | 等价 env | 说明 |
+|------|----------|------|
+| `--lan-only` | `DAO_LAN_ONLY=1` | 不穿 NAT 不开隧道, 纯局域网 |
+| `--no-tunnel` | `NO_TUNNEL=1` | 禁 cloudflared/ngrok/SSH |
+| `--no-nat` | `DAO_NO_NAT=1` | 禁 UPnP IGD / NAT-PMP |
+| `--no-browser` | `DAO_NO_BROWSER=1` | 启动后不自动打开浏览器 |
+| `--install` | — | 注册开机自启 (Windows schtasks / Linux systemd) |
+| `--uninstall` | — | 注销开机自启 |
+| `--service-status` | — | 查看自启状态 |
+
+## 故障排查 (Troubleshooting)
+
+**Windows 上 Python Relay 启动即 `PermissionError 10013`**
+> 症状: `[relay!] PermissionError: [WinError 10013] 以一种访问权限不允许的方式...`
+> 原因: Relay 分到的动态端口落在 Windows Hyper-V/WSL/winnat 保留区 (通常 49152-65535).
+> 处理: **v8.7 已修** — `portSync()` 改用 20000-40000 用户区, Relay 改绑 `127.0.0.1`, 且 exit 非 0 时 dao.js 自动换口重启.
+> 验证: `netsh int ipv4 show excludedportrange protocol=tcp` 可查本机排除列表.
+
+**Hub 启动时 banner 打印两次**
+> v8.6 及以下遇端口冲突触发递归 retry 时, `listening` 回调累积未清; **v8.7 已修**.
+
+**Banner 误把 LAN IP 标为 "外网"**
+> v8.6 及以下当 `PUBLIC_URL` 是 LAN IP 时仍打 "外网" 标签; **v8.7 已修** — 仅真实公网 URL 才标 "外网".
+
+**Linux 上 `nvm: command not found`**
+> `command -v nvm` 无法识别 shell function; **v8.7 install.sh 已修** — 先 `. $HOME/.nvm/nvm.sh` 再检测.
+
+**Linux 上 `unzip: command not found`**
+> **v8.7 已修** — 兜底 `bsdtar` / `jar xf`, 三选一即可解压.
+
+**想只 LAN 用, 不要公网暴露**
+> `node dao.js --lan-only` 或设 `DAO_LAN_ONLY=1`; 完全关闭 cloudflared + UPnP.
 
 ## 项目结构
 

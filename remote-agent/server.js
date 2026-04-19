@@ -128,8 +128,10 @@ var _rtcPostBox = { offer: [], answer: [] };
 // 万法之资: 远程工具注册表 — 道核发现的一切可用投屏/远程工具
 var _remoteTools = JSON.parse(process.env.DAO_REMOTE_TOOLS || "[]");
 
-// 道核状态 (由 dao.js 注入)
-var _daoFingerprint = process.env.DAO_FINGERPRINT || "";
+// 道核状态 (dao.js 优先注入; 单进程启动 server.js 时 fallback 自身身份)
+// 道法自然: 即使绕过 dao.js 直接 node remote-agent/server.js 也要有身份, 不然 /pair 会报错
+var _daoFingerprint =
+  process.env.DAO_FINGERPRINT || _daoIdentity.fingerprint || "";
 var _daoAdbPath = process.env.DAO_ADB_PATH || "";
 var _daoBestInput = process.env.DAO_BEST_INPUT || "";
 var _daoBestCodec = process.env.DAO_BEST_CODEC || "";
@@ -2696,7 +2698,7 @@ const server = http.createServer(function (req, res) {
       screenObj[k] = v;
     });
     jsonReply(res, {
-      version: "dao-v7",
+      version: "dao-v8.7",
       publicUrl: _publicUrl,
       tunnel: isSecure(),
       dao: {
@@ -3173,7 +3175,7 @@ const server = http.createServer(function (req, res) {
     jsonReply(res, {
       ok: true,
       service: "dao-remote-hub",
-      version: "8.0",
+      version: "8.7",
       uptime: process.uptime(),
       agents: agentSockets.size,
       sense: senseData.connected,
@@ -4121,6 +4123,9 @@ function setPublicUrl(url) {
 function start(port, _retryCount) {
   port = port || PORT;
   _retryCount = _retryCount || 0;
+  // 道·唯一: 清空所有残留监听器, 避免 retry 累积 "listening" 回调造成重复 banner
+  server.removeAllListeners("error");
+  server.removeAllListeners("listening");
   server.on("error", function (err) {
     if (err.code === "EADDRINUSE") {
       server.removeAllListeners("error");
@@ -4146,7 +4151,7 @@ function start(port, _retryCount) {
     var proto = httpProto();
     var tokenQ = MASTER_TOKEN ? "?token=" + MASTER_TOKEN : "";
     var lanIPs = getAllLanIPs();
-    console.log("\n===== 道 · 远程中枢 [Ed25519端到端] v8.0 =====");
+    console.log("\n===== 道 · 远程中枢 [Ed25519端到端] v8.7 =====");
     if (_daoFingerprint) console.log("身份:  " + _daoFingerprint);
     var primaryHost = lanIPs[0] || "127.0.0.1";
     console.log("五感:  http://" + primaryHost + ":" + port);
@@ -4174,7 +4179,18 @@ function start(port, _retryCount) {
     console.log("配对:  http://" + primaryHost + ":" + port + "/pair (QR)");
     console.log("发现:  http://" + primaryHost + ":" + port + "/dao/discover");
     console.log("Relay: http://" + primaryHost + ":" + port + "/relay/");
-    if (_publicUrl) console.log("外网:  " + proto + "://" + _publicUrl);
+    // 道·正名: 仅当 _publicUrl 确非私有 LAN IP 时才标 "外网", 否则标 "回应"
+    if (_publicUrl) {
+      var _pubHost = _publicUrl.split(":")[0];
+      var _isPrivate =
+        /^127\./.test(_pubHost) ||
+        /^10\./.test(_pubHost) ||
+        /^192\.168\./.test(_pubHost) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(_pubHost) ||
+        /^169\.254\./.test(_pubHost) ||
+        /\.local$/.test(_pubHost);
+      if (!_isPrivate) console.log("外网:  " + proto + "://" + _publicUrl);
+    }
     if (_daoBestInput) console.log("输入:  " + _daoBestInput);
     if (_daoBestCodec) console.log("编码:  " + _daoBestCodec);
     if (_remoteTools.length > 0) {

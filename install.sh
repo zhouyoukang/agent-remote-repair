@@ -40,12 +40,17 @@ check_node() {
 }
 
 install_node() {
-    echo "  [1/4] Node.js 未找到或版本过低，尝试自动安装..." 
+    echo "  [1/4] Node.js 未找到或版本过低，尝试自动安装..."
 
-    # 尝试 nvm
-    if command -v nvm &>/dev/null; then
-        nvm install --lts && nvm use --lts
-        return $?
+    # 尝试 nvm — nvm 是 shell function 非 binary, command -v 无法识别
+    # 必须先 source 用户 shell 初始化文件再检测
+    if [ -s "$HOME/.nvm/nvm.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.nvm/nvm.sh"
+        if command -v nvm &>/dev/null; then
+            nvm install --lts && nvm use --lts
+            return $?
+        fi
     fi
 
     # 尝试包管理器
@@ -97,10 +102,14 @@ downloaded=false
 for url in "${MIRRORS[@]}"; do
     echo "    尝试: ${url:0:60}..."
     if curl -fsSL --connect-timeout 15 --max-time 120 -o "$TMP_ZIP" "$url" 2>/dev/null; then
-        if [ -s "$TMP_ZIP" ]; then
+        # 道·去伪: 10KB 门槛过滤 CDN 异常空返回 / 错误页面
+        size=$(wc -c < "$TMP_ZIP" 2>/dev/null || echo 0)
+        if [ "$size" -gt 10240 ]; then
             downloaded=true
-            echo "    ✓ 下载完成"
+            echo "    ✓ 下载完成 ($size bytes)"
             break
+        else
+            echo "    × 下载文件过小 ($size bytes), 重试下一镜像..."
         fi
     fi
 done
@@ -110,10 +119,19 @@ if [ "$downloaded" = false ]; then
     exit 1
 fi
 
-# 解压
+# 道·柔: 兜底 unzip/bsdtar/jar, 不强求单一工具
 rm -rf "$TMP_EXTRACT"
 mkdir -p "$TMP_EXTRACT"
-unzip -q "$TMP_ZIP" -d "$TMP_EXTRACT"
+if command -v unzip &>/dev/null; then
+    unzip -q "$TMP_ZIP" -d "$TMP_EXTRACT"
+elif command -v bsdtar &>/dev/null; then
+    bsdtar -xf "$TMP_ZIP" -C "$TMP_EXTRACT"
+elif command -v jar &>/dev/null; then
+    (cd "$TMP_EXTRACT" && jar xf "$TMP_ZIP")
+else
+    echo "  [ERROR] 需要 unzip 或 bsdtar 或 jar 来解压. 请先安装: apt install unzip"
+    exit 1
+fi
 
 INNER_DIR=$(find "$TMP_EXTRACT" -mindepth 1 -maxdepth 1 -type d | head -1)
 if [ -z "$INNER_DIR" ]; then

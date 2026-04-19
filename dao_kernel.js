@@ -117,11 +117,12 @@ class DaoEntropy {
         return port;
       }
     } catch (e) {}
-    // Node.js v22+: listen() fully async — fallback to ephemeral range
+    // Node.js v22+: listen() fully async — fallback to **user range 20000-40000**
+    // 道·避险: 不用 49152-65535 (Windows Hyper-V/WSL/winnat 常预留), 改用用户区避 PermissionError 10013
     try {
       srv.close();
     } catch (e) {}
-    return 49152 + Math.floor(Math.random() * 16000);
+    return 20000 + Math.floor(Math.random() * 20000);
   }
 }
 

@@ -457,9 +457,14 @@ ok(
     assert.ok(html.indexOf("go('files'") > 0, "files tab missing");
     assert.ok(html.indexOf("go('clip'") > 0, "clip tab missing");
     assert.ok(html.indexOf("go('wake'") > 0, "wake tab missing");
+    assert.ok(html.indexOf("go('rec'") > 0, "rec tab missing");
     assert.ok(html.indexOf('id="p-files"') > 0, "files page div missing");
     assert.ok(html.indexOf('id="p-clip"') > 0, "clip page div missing");
     assert.ok(html.indexOf('id="p-wake"') > 0, "wake page div missing");
+    assert.ok(html.indexOf('id="p-rec"') > 0, "rec page div missing");
+    assert.ok(html.indexOf("function recLoad") > 0, "recLoad fn missing");
+    assert.ok(html.indexOf("function recStart") > 0, "recStart fn missing");
+    assert.ok(html.indexOf("function recPlay") > 0, "recPlay fn missing");
     assert.ok(html.indexOf("/dao/wol") > 0, "WoL endpoint not wired");
     assert.ok(html.indexOf("/dao/clipboard") > 0, "clipboard not wired");
     assert.ok(html.indexOf("/files/put") > 0, "upload not wired");

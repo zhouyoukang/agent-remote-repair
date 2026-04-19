@@ -139,6 +139,7 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
     <button class="tab" onclick="go('files',this)">文件</button>
     <button class="tab" onclick="go('clip',this)">剪贴板</button>
     <button class="tab" onclick="go('wake',this)">唤醒</button>
+    <button class="tab" onclick="go('rec',this)">录制</button>
     <a href="/marble${TOKEN ? "?token=" + TOKEN : ""}" class="tab" style="text-decoration:none;color:inherit">3D世界</a>
   </div>
   <div id="p-home" class="page act">
@@ -271,6 +272,25 @@ body{background:#0a0e17;color:#e0e0e0;font-family:-apple-system,'Segoe UI','Micr
         <button onclick="wakeCustom()">唤醒</button>
       </div>
       <div class="scr-info" id="wakeInfo" style="margin-top:8px">空闲</div>
+    </div>
+  </div>
+  <div id="p-rec" class="page">
+    <div class="card">
+      <h3>会话录制 · 守静笃</h3>
+      <p>从当前最佳投屏源周期性采样 JPEG 帧, 磁盘存 frames/*.jpg。零编码、零外设、多媒介回放。</p>
+      <div class="ti" style="margin-bottom:10px">
+        <label style="margin-right:8px">帧率 <input type="number" id="recFps" value="1" min="0.1" max="10" step="0.5" style="width:60px"> fps</label>
+        <label style="margin-right:8px">时长上限 <input type="number" id="recMax" value="3600" min="1" max="86400" step="60" style="width:80px"> 秒</label>
+        <button onclick="recStart()">开始录制</button>
+        <button onclick="recLoad()" class="cbtn">刷新列表</button>
+      </div>
+      <div class="scr-info" id="recInfo" style="margin-bottom:8px">空闲</div>
+      <div id="recList"><div class="empty">加载中...</div></div>
+    </div>
+    <div class="card" id="recPlayCard" style="display:none">
+      <h3 id="recPlayTitle">回放</h3>
+      <img id="recPlayImg" style="max-width:100%;display:block;border:1px solid #2a3050;border-radius:8px">
+      <button onclick="recPlayClose()" class="cbtn" style="margin-top:8px">关闭回放</button>
     </div>
   </div>
 </div>
@@ -427,6 +447,7 @@ function go(id,btn){
   if(id==='files'&&!window._fLoaded){window._fLoaded=true;fList();}
   if(id==='clip'&&!window._clipLoaded){window._clipLoaded=true;clipRead();}
   if(id==='wake'){wakeLoad();}
+  if(id==='rec'){recLoad();}
 }
 // ═══════ 文件传输 (v8.2 backend · v8.3 UI) ═══════
 var TK=${TOKEN ? '"' + TOKEN + '"' : '""'};
@@ -581,6 +602,98 @@ function wakeCustom(){
   var m=document.getElementById('wakeMac').value.trim();
   if(!m)return;
   wakeGo(m);
+}
+// ═══════ 会话录制 (v8.5 backend · v8.6 UI) · 守静笃 ═══════
+function recFmtBytes(n){
+  n=Number(n)||0;
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  if(n<1073741824)return (n/1048576).toFixed(1)+' MB';
+  return (n/1073741824).toFixed(2)+' GB';
+}
+function recFmtDur(ms){
+  if(!ms||ms<0)return '-';
+  var s=Math.floor(ms/1000);
+  var h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;
+  return (h?h+'h':'')+(m||h?m+'m':'')+ss+'s';
+}
+async function recLoad(){
+  var box=document.getElementById('recList');
+  box.innerHTML='<div class="empty">查询中...</div>';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/record'+fUrl(),{headers:headers});
+    var d=await r.json();
+    if(!d.ok||!d.enabled){box.innerHTML='<div class="empty" style="color:#f44336">录制器未启用</div>';return}
+    if(!d.sessions||d.sessions.length===0){box.innerHTML='<div class="empty">暂无录制</div>';return}
+    var html='<div style="display:grid;grid-template-columns:90px 1fr auto;gap:8px;align-items:center">';
+    d.sessions.forEach(function(m){
+      var dur=m.stoppedAt?recFmtDur(m.stoppedAt-m.startedAt):'<b style="color:#ffa726">录制中</b>';
+      var thumbUrl='/dao/record/thumb?id='+encodeURIComponent(m.id)+(TK?'&token='+encodeURIComponent(TK):'');
+      html+='<img src="'+thumbUrl+'" style="width:80px;height:60px;object-fit:cover;border:1px solid #2a3050;border-radius:4px;background:#0a0e14" onerror="this.style.display=\\'none\\'">';
+      html+='<div><div style="font-family:monospace;font-size:12px">'+esc(m.id)+'</div>';
+      html+='<div style="color:#888;font-size:11px">'+m.fps+'fps · '+m.frames+' 帧 · '+recFmtBytes(m.sizeBytes)+' · '+dur+' · '+esc(m.source||'?')+'</div></div>';
+      html+='<div>';
+      if(m.status==='recording')html+='<button onclick="recStop(\\''+esc(m.id)+'\\')">停止</button> ';
+      else html+='<button onclick="recPlay(\\''+esc(m.id)+'\\')">回放</button> ';
+      html+='<button class="cbtn" onclick="recDelete(\\''+esc(m.id)+'\\')">删除</button>';
+      html+='</div>';
+    });
+    html+='</div>';
+    box.innerHTML=html;
+  }catch(e){box.innerHTML='<div class="empty" style="color:#f44336">'+esc(e.message)+'</div>';}
+}
+async function recStart(){
+  var fps=parseFloat(document.getElementById('recFps').value)||1;
+  var max=parseInt(document.getElementById('recMax').value)||3600;
+  document.getElementById('recInfo').textContent='启动录制 '+fps+'fps...';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/record'+fUrl('fps='+fps+'&max='+max+'&source=sense-ui'),{method:'POST',headers:headers});
+    var d=await r.json();
+    if(!d.ok)throw new Error(d.error||'启动失败');
+    document.getElementById('recInfo').textContent='录制中: '+d.id;
+    recLoad();
+  }catch(e){document.getElementById('recInfo').textContent='失败: '+e.message;}
+}
+async function recStop(id){
+  document.getElementById('recInfo').textContent='停止 '+id+'...';
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/record/stop'+fUrl('id='+encodeURIComponent(id)),{method:'POST',headers:headers});
+    var d=await r.json();
+    if(!d.ok)throw new Error(d.error||'停止失败');
+    document.getElementById('recInfo').textContent='已停止: '+id+' ('+d.meta.frames+' 帧)';
+    recLoad();
+  }catch(e){document.getElementById('recInfo').textContent='失败: '+e.message;}
+}
+async function recDelete(id){
+  if(!confirm('删除录制 '+id+' ?此操作不可恢复'))return;
+  try{
+    var headers={};if(TK)headers.Authorization='Bearer '+TK;
+    var r=await fetch('/dao/record'+fUrl('id='+encodeURIComponent(id)),{method:'DELETE',headers:headers});
+    var d=await r.json();
+    if(!d.ok)throw new Error('删除失败');
+    document.getElementById('recInfo').textContent='已删除: '+id;
+    if(document.getElementById('recPlayCard').dataset.playId===id)recPlayClose();
+    recLoad();
+  }catch(e){document.getElementById('recInfo').textContent='失败: '+e.message;}
+}
+function recPlay(id){
+  var url='/dao/record/play?id='+encodeURIComponent(id)+(TK?'&token='+encodeURIComponent(TK):'');
+  var card=document.getElementById('recPlayCard');
+  card.style.display='';
+  card.dataset.playId=id;
+  document.getElementById('recPlayTitle').textContent='回放: '+id;
+  document.getElementById('recPlayImg').src=url;
+  card.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function recPlayClose(){
+  var card=document.getElementById('recPlayCard');
+  card.style.display='none';
+  card.dataset.playId='';
+  // 切断 multipart 流: 换空 src, 否则浏览器会继续持有连接
+  document.getElementById('recPlayImg').src='';
 }
 function sPill(s,t){var e=document.getElementById('sPill');e.className='pill '+s;e.innerHTML='<span class="d"></span>'+t}
 function aPill(s,t){var e=document.getElementById('aPill');e.className='pill '+s;e.innerHTML='<span class="d"></span>'+t}

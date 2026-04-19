@@ -212,6 +212,8 @@ async function waitListen() {
     if (html.indexOf("go('files'") < 0) throw new Error("files tab missing");
     if (html.indexOf("go('wake'") < 0) throw new Error("wake tab missing");
     if (html.indexOf("go('clip'") < 0) throw new Error("clip tab missing");
+    if (html.indexOf("go('rec'") < 0) throw new Error("rec tab missing");
+    if (html.indexOf('id="p-rec"') < 0) throw new Error("rec page div missing");
   });
 
   console.log(
